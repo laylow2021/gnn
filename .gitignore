@@ -1,0 +1,31 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+.env
+.env.local
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tooling artifacts
+.pytest_cache/
+.mypy_cache/
+ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints
+
+# Editors
+.vscode/
+.idea/
+
+# Data (keep placeholder only)
+data/*
+!data/.gitkeep
