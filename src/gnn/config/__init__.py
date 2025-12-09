@@ -1,10 +1,10 @@
-"""Modular graph framework with config-driven layers."""
+"""Configuration handling for the modular graph framework."""
 
-from .analysis import DataAnalysis
-from .config import (
+from .schema import (
     AnalysisConfig,
     BatchEdgeRuleConfig,
     DataConfig,
+    TransactionAnomalyConfig,
     EdgeDerivationConfig,
     FeatureDefinition,
     FeatureGroup,
@@ -18,13 +18,10 @@ from .config import (
     TrainingConfig,
     PipelineConfig,
 )
-from .graph import GraphBuilder
-from .modeling import ModelRegistry
 
 __all__ = [
     "AnalysisConfig",
     "BatchEdgeRuleConfig",
-    "DataAnalysis",
     "DataConfig",
     "EdgeDerivationConfig",
     "FeatureDefinition",
@@ -32,12 +29,11 @@ __all__ = [
     "FeatureGroupConfig",
     "FeaturesConfig",
     "FlowEdgeRuleConfig",
-    "GraphBuilder",
     "GraphConfig",
     "ModelConfig",
-    "ModelRegistry",
     "ModelTask",
     "SimilarityEdgeRuleConfig",
+    "TransactionAnomalyConfig",
     "TrainingConfig",
     "PipelineConfig",
 ]

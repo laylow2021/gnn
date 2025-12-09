@@ -1,1 +1,17 @@
-# Runtime dependencies (pin versions when added)
+# GPU builds (CUDA 12.1 for RTX 4070 Ti)
+--extra-index-url https://download.pytorch.org/whl/cu121
+--find-links https://data.pyg.org/whl/torch-2.2.0+cu121.html
+
+torch==2.2.0+cu121
+torch-geometric==2.4.0
+torch-scatter==2.1.2
+torch-sparse==0.6.18
+numpy>=1.26.0,<2.0
+scipy>=1.11.0
+networkx>=3.2.0
+pandas>=2.1.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+pyyaml>=6.0.1
+pydantic>=1.10,<2.0
+scikit-learn>=1.3.0

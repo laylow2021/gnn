@@ -1,0 +1,2 @@
+num_transactions,num_accounts,total_amount,mean_amount,median_amount,time_span_days
+6,4,1010.0,168.33333333333334,102.5,0.20833333333333334

@@ -1,0 +1,118 @@
+data:
+  raw_path: data/transactions.csv
+  target: fraud_label
+  splits:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  seed: 7
+graph:
+  src_column: from_account
+  dst_column: to_account
+  timestamp_column: event_time
+  amount_column: amount
+  target_column: fraud_label
+  metadata_label: demo-transactions
+  edge_derivation:
+    flow:
+      enabled: true
+      fintech_account_column: fintech_acct_id
+      counterparty_account_column: counterparty_acct_id
+      timestamp_column: event_time
+      amount_column: amount
+      direction_column: direction
+      incoming_values: [CREDIT]
+      outgoing_values: [DEBIT]
+      reference_column: reference
+      time_window_minutes: 120
+      amount_tolerance_pct: 0.1
+    batch:
+      enabled: true
+      batch_id_column: batch_id
+      counterparty_account_column: counterparty_acct_id
+      amount_column: amount
+    similarity:
+      enabled: true
+      counterparty_account_column: counterparty_acct_id
+      name_column: counterparty_name
+      address_column: counterparty_address
+      city_column: counterparty_city
+      bank_id_column: counterparty_bank_id
+      name_similarity_threshold: 0.85
+      address_similarity_threshold: 0.85
+      city_similarity_threshold: 0.8
+      token_similarity_threshold: 0.6
+features:
+  node:
+    structural:
+      - name: in_degree
+        method: degree_in
+      - name: out_degree
+        method: degree_out
+    temporal:
+      - name: recency_days
+        columns: [event_time]
+        method: recency_days
+      - name: amount_recent_sum
+        columns: [event_time, amount]
+        method: rolling_sum
+        params:
+          window_days: 7
+    static:
+      - name: home_bank
+        columns: [from_bank]
+        method: mean
+      - name: city
+        columns: [counterparty_city]
+        method: category_one_hot
+      - name: country
+        columns: [counterparty_country]
+        method: category_one_hot
+    risk:
+      - name: manual_risk_flag
+        columns: [risk_flag]
+        method: mean
+  edge:
+    structural:
+      - name: amount
+        columns: [amount]
+        method: identity
+    temporal:
+      - name: age_days
+        columns: [event_time]
+        method: age_days
+    risk:
+      - name: flagged
+        columns: [risk_flag]
+        method: boolean
+      - name: risk_category
+        columns: [risk_reason]
+        method: category_one_hot
+model:
+  task: link_prediction
+  name: shallow-link
+  params:
+    hidden_dim: 64
+    encoder: graphsage  # options: mlp, graphsage, gcn, gat
+    gat_heads: 4
+analysis:
+  output_dir: artifacts/analysis
+  sample_size: 5000
+  include_plots: true
+train:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 0.0
+  batch_size: 1
+  device: cpu
+transaction_anomaly:
+  enabled: true
+  counterparty_account_column: counterparty_acct_id
+  amount_column: amount
+  timestamp_column: event_time
+  direction_column: direction
+  features: []
+  method: isolation_forest
+  contamination: 0.02
+  subgraph_hops: 1
+  subgraph_min_size: 2
