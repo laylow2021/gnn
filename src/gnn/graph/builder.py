@@ -44,8 +44,15 @@ class GraphBuilder:
             edge_attr, edge_feature_names = self._tensor_from_edge_frame(edges_df, derived.feature_names)
             base_df = df.copy()
             # Ensure node feature computations have src/dst columns; if missing, map to counterparty column used in edge derivation.
-            flow_cfg = self.graph_cfg.edge_derivation.flow if self.graph_cfg.edge_derivation else None
-            counterparty_col = flow_cfg.counterparty_account_column if flow_cfg else None
+            counterparty_col = None
+            if self.graph_cfg.edge_derivation:
+                if self.graph_cfg.edge_derivation.flow and self.graph_cfg.edge_derivation.flow.counterparty_account_column:
+                    counterparty_col = self.graph_cfg.edge_derivation.flow.counterparty_account_column
+                elif self.graph_cfg.edge_derivation.batch and self.graph_cfg.edge_derivation.batch.counterparty_account_column:
+                    counterparty_col = self.graph_cfg.edge_derivation.batch.counterparty_account_column
+                elif self.graph_cfg.edge_derivation.similarity and self.graph_cfg.edge_derivation.similarity.counterparty_account_column:
+                    counterparty_col = self.graph_cfg.edge_derivation.similarity.counterparty_account_column
+            
             if self.graph_cfg.src_column not in base_df.columns and counterparty_col and counterparty_col in base_df.columns:
                 base_df[self.graph_cfg.src_column] = base_df[counterparty_col]
             if self.graph_cfg.dst_column not in base_df.columns and counterparty_col and counterparty_col in base_df.columns:

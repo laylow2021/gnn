@@ -84,3 +84,45 @@ def test_graph_builder_uses_edge_derivation_when_configured():
 
     assert artifacts.data.edge_index.shape[1] == 1
     assert artifacts.data.metadata["feature_schema"]["edge"]  # should have flow features
+
+
+def test_build_with_batch_derivation_and_missing_node_columns():
+    """
+    Tests that the GraphBuilder can correctly use the `counterparty_account_column`
+    from a 'batch' rule when the original DataFrame for node features is missing
+    'src' and 'dst' columns. This specifically tests the bugfix where this
+    column was only being looked for in the 'flow' config.
+    """
+    txn_df = pd.DataFrame({
+        "acct": ["a", "b", "c"],
+        "other_acct": ["x", "y", "z"],
+        "ts": pd.to_datetime(["2024-01-01T10:00:00", "2024-01-01T10:00:05", "2024-01-01T11:00:00"]),
+    })
+    graph_cfg = GraphConfig(
+        src_column="src",
+        dst_column="dst",
+        edge_derivation=EdgeDerivationConfig(
+            flow=FlowEdgeRuleConfig(enabled=False),
+            batch=BatchEdgeRuleConfig(
+                enabled=True,
+                fintech_account_column="acct",
+                counterparty_account_column="other_acct",
+                timestamp_column="ts",
+                window_secs=60,
+            ),
+            similarity=SimilarityEdgeRuleConfig(enabled=False),
+        ),
+    )
+    # Enable a node feature to ensure the node feature calculation path is triggered
+    features_cfg = FeaturesConfig(
+        node=FeatureGroupConfig(structural=[FeatureDefinition(name="degree", method="degree")])
+    )
+    builder = GraphBuilder(graph_cfg, features_cfg)
+
+    # This call should not raise an exception, which is the primary test
+    artifacts = builder.build(txn_df)
+
+    # Assert that the graph was built correctly
+    assert artifacts.data.num_nodes == 4  # a, b, x, y (c and z are not in the derived edge)
+    assert artifacts.data.edge_index.shape[1] == 1  # One edge: a -> b
+    assert artifacts.data.x.shape == (4, 1)  # 4 nodes, 1 feature
