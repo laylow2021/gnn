@@ -24,3 +24,7 @@ class Schema:
     # Edge Types
     EDGE_OWNS = "owns"
     EDGE_EXECUTED = "executed"
+    
+    # Reverse Edge Types
+    EDGE_OWNED_BY = "owned_by"
+    EDGE_EXECUTED_BY = "executed_by"

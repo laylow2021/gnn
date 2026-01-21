@@ -101,6 +101,13 @@ class GraphBuilder:
         # Edge: Customer -> Account
         data[Schema.NODE_CUSTOMER, Schema.EDGE_OWNS, Schema.NODE_ACCOUNT].edge_index = \
             torch.tensor(cust_acc_pairs, dtype=torch.long)
+            
+        # Reverse Edge: Account -> Customer
+        # Flip pairs: (1, N) -> (N, 1) -> (2, N) where row 0 is account, row 1 is customer
+        # cust_acc_pairs is (2, N). Row 0: Cust, Row 1: Acc.
+        # We want Row 0: Acc, Row 1: Cust.
+        data[Schema.NODE_ACCOUNT, Schema.EDGE_OWNED_BY, Schema.NODE_CUSTOMER].edge_index = \
+             torch.tensor(np.flip(cust_acc_pairs, axis=0).copy(), dtype=torch.long)
 
         # Edge: Account -> Transaction
         # Each row is a transaction executed by the account on that row.
@@ -109,6 +116,10 @@ class GraphBuilder:
         
         data[Schema.NODE_ACCOUNT, Schema.EDGE_EXECUTED, Schema.NODE_TRANSACTION].edge_index = \
             torch.tensor(acc_txn_pairs, dtype=torch.long)
+            
+        # Reverse Edge: Transaction -> Account
+        data[Schema.NODE_TRANSACTION, Schema.EDGE_EXECUTED_BY, Schema.NODE_ACCOUNT].edge_index = \
+             torch.tensor(np.flip(acc_txn_pairs, axis=0).copy(), dtype=torch.long)
 
         # ---------------------------------------------------------
         # 3. Node Features (Placeholders/Calculated)

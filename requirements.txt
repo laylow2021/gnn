@@ -1,1 +1,7 @@
-# Runtime dependencies (pin versions when added)
+torch
+torch-geometric
+pandas
+numpy
+scikit-learn
+matplotlib
+pytest
