@@ -16,6 +16,19 @@ class Schema:
     TIMESTAMP_NORM = "timestamp_norm"
     DIRECTION_ENCODED = "direction_encoded"
     
+    # Advanced Features (Peak & Shift)
+    PEAK_FLOW_THROUGH = "peak_flow_through"
+    PEAK_ROUNDNESS = "peak_roundness"
+    PEAK_ENTROPY = "peak_entropy"
+    SHIFT_SCORE = "shift_score"
+    
+    # Identifiers
+    ACCOUNT_ID = "account_id"
+    RESOLVED_ENTITY_ID = "resolved_entity_id"
+    SYNDICATE_ID = "syndicate_id"
+    IS_SUPERNODE = "is_supernode"
+    RISK_SCORE = "risk_score"
+    
     # Node Types
     NODE_CUSTOMER = "customer"
     NODE_ACCOUNT = "account"
