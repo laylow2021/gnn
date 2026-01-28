@@ -1,6 +1,9 @@
 import numpy as np
-from typing import List, Dict, Union
+import pandas as pd
+from typing import List, Dict, Union, Optional
 import logging
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import silhouette_score
 
 logger = logging.getLogger(__name__)
 
@@ -8,6 +11,76 @@ try:
     import faiss
 except ImportError:
     faiss = None
+
+def perform_hierarchical_clustering(
+    data: pd.DataFrame, 
+    features: List[str], 
+    n_clusters: Optional[int] = None, 
+    **kwargs
+) -> pd.Series:
+    """
+    Performs hierarchical clustering on the provided DataFrame using specified features.
+    
+    If n_clusters is not provided, it attempts to automatically detect the optimal number 
+    of clusters using Silhouette Score (searching between 2 and min(10, n_samples)).
+    Alternatively, 'distance_threshold' can be passed in **kwargs to use a distance cut-off.
+
+    Args:
+        data: Input pandas DataFrame.
+        features: List of column names to use for clustering.
+        n_clusters: The number of clusters to find. If None, auto-detection or distance_threshold is used.
+        **kwargs: Additional arguments passed to sklearn.cluster.AgglomerativeClustering.
+
+    Returns:
+        pd.Series: Cluster labels with the same index as the input DataFrame.
+    """
+    if data.empty:
+        return pd.Series(dtype=int)
+        
+    X = data[features].values
+    
+    # Handle small datasets where clustering usually defaults to a single group
+    if len(X) < 2:
+        return pd.Series([0] * len(X), index=data.index)
+
+    # Automatic detection logic if n_clusters is None
+    if n_clusters is None:
+        # Check if user provided distance_threshold
+        if "distance_threshold" in kwargs:
+            model = AgglomerativeClustering(n_clusters=None, **kwargs)
+            labels = model.fit_predict(X)
+            return pd.Series(labels, index=data.index)
+        
+        # Otherwise, use Silhouette Score to find best k
+        best_k = 2
+        best_score = -1
+        
+        # Search range: 2 to min(10, n_samples)
+        max_k = min(10, len(X))
+        
+        # If we only have 2 samples, we can only do 2 clusters (which is max_k)
+        if max_k <= 2:
+            best_k = 2
+        else:
+            for k in range(2, max_k):
+                temp_model = AgglomerativeClustering(n_clusters=k, **kwargs)
+                temp_labels = temp_model.fit_predict(X)
+                
+                # Silhouette score requires at least 2 clusters and > 1 sample
+                # fit_predict with n_clusters=k guarantees k clusters if n_samples >= k
+                if len(np.unique(temp_labels)) > 1:
+                    score = silhouette_score(X, temp_labels)
+                    if score > best_score:
+                        best_score = score
+                        best_k = k
+        
+        n_clusters = best_k
+
+    # Final fit with determined or provided n_clusters
+    model = AgglomerativeClustering(n_clusters=n_clusters, **kwargs)
+    labels = model.fit_predict(X)
+    
+    return pd.Series(labels, index=data.index)
 
 def cluster_vectors_with_faiss(
     vectors: np.ndarray, 
