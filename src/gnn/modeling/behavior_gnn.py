@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import SAGEConv, HeteroConv, Linear
+from torch_geometric.nn import SAGEConv, GATConv, HeteroConv, Linear
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Tuple, Union
@@ -149,16 +149,25 @@ class BehaviorGraphBuilder:
 class BehavioralGNN(torch.nn.Module):
     """
     GNN Architecture that aggregates signals from multiple behavioral node types.
+    Supports 'sage' (GraphSAGE) and 'gat' (Graph Attention) architectures.
     """
-    def __init__(self, data_metadata, hidden_channels=64, out_channels=64, num_layers=2):
+    def __init__(self, data_metadata, hidden_channels=64, out_channels=64, num_layers=2, architecture='sage'):
         super().__init__()
         self.convs = torch.nn.ModuleList()
         self.lin = Linear(-1, out_channels)
+        self.architecture = architecture.lower()
         
         for _ in range(num_layers):
             conv_dict = {}
             for edge_type in data_metadata[1]:
-                conv_dict[edge_type] = SAGEConv((-1, -1), hidden_channels)
+                # edge_type is (src_type, rel_type, dst_type)
+                if self.architecture == 'gat':
+                    # GAT: Uses attention mechanisms to weigh neighbors
+                    # add_self_loops=False is critical for bipartite graphs
+                    conv_dict[edge_type] = GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=1, concat=False)
+                else:
+                    # SAGE: Standard mean/sum aggregation (Robust & Fast)
+                    conv_dict[edge_type] = SAGEConv((-1, -1), hidden_channels)
             
             self.convs.append(HeteroConv(conv_dict, aggr='sum'))
 
