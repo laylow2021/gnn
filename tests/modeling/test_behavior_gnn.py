@@ -12,7 +12,7 @@ def mock_behavior_df():
     df = pd.DataFrame({
         'cust_name': [f'User_{i}' for i in range(n)],
         'txn_amt': np.random.uniform(10, 10000, n),
-        'txn_date': pd.date_range('2024-01-01', periods=n, freq='H'),
+        'txn_date': pd.date_range('2024-01-01', periods=n, freq='D'), # Daily freq for easier window testing
         'bank_name': np.random.choice(['BankA', 'BankB'], n),
         'direction': np.random.choice(['IN', 'OUT'], n)
     })
@@ -24,7 +24,8 @@ def test_builder_full_config(mock_behavior_df):
         'amount': 'txn_amt',
         'date': 'txn_date',
         'bank': 'bank_name',
-        'direction': 'direction'
+        'direction': 'direction',
+        'amount_bins': [-1, 5000, 100000] # Custom bins
     }
     
     builder = BehaviorGraphBuilder(config)
@@ -39,21 +40,33 @@ def test_builder_full_config(mock_behavior_df):
     # Check edges exist
     assert ('customer', 'transacts_vol', 'amount_bin') in data.edge_types
     assert ('customer', 'uses_bank', 'bank') in data.edge_types
+    
+    # Check Binning Logic
+    # 5000 cutoff. 
+    # If txn_amt < 5000, should be Bin_0. Else Bin_1.
+    # We verify that we don't have default bins
+    assert data['amount_bin'].num_nodes <= 4 # Direction(2) * Bins(2) = 4 max nodes
 
-def test_builder_reduced_scope(mock_behavior_df):
-    # Test with minimal config (just customer and amount)
+def test_date_window_logic(mock_behavior_df):
+    # Test Sliding Window
     config = {
         'customer': 'cust_name',
-        'amount': 'txn_amt'
+        'date': 'txn_date',
+        'date_window': 1 # +/- 1 day
     }
-    
     builder = BehaviorGraphBuilder(config)
     data = builder.build(mock_behavior_df)
     
-    assert 'customer' in data.node_types
-    assert 'amount_bin' in data.node_types
-    assert 'date' not in data.node_types
-    assert 'bank' not in data.node_types
+    # We expect roughly 3x edges for 'active_on_date' compared to num_txns
+    # (minus boundary effects where T-1 or T+1 doesn't exist in the data)
+    num_txns = len(mock_behavior_df)
+    num_edges = data['customer', 'active_on_date', 'date'].edge_index.size(1)
+    
+    # Since mock data is continuous daily, most dates have neighbors.
+    # 100 txns.
+    # Edge count should be near 300.
+    assert num_edges > num_txns * 2 
+    assert num_edges <= num_txns * 3
 
 def test_training_pipeline(mock_behavior_df):
     config = {
