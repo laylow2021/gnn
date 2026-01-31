@@ -2,53 +2,42 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import HeteroData
-from torch_geometric.loader import NeighborLoader
-from torch_geometric.nn import SAGEConv, GATConv, RGCNConv, HeteroConv, Linear
+from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
+from torch_geometric.nn import SAGEConv, GATConv, HeteroConv, Linear
 from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import IsolationForest
 import numpy as np
 
 # ==========================================
 # 1. Data Preparation Module
 # ==========================================
 
-def prepare_hetero_data(df, customer_id_col, bank_id_col, cust_feature_cols, bank_feature_cols, edge_feature_cols, label_col=None):
+def prepare_hetero_data(df, customer_id_col, bank_id_col, cust_feature_cols, bank_feature_cols, edge_feature_cols):
     """
     Prepares a PyG HeteroData object from a pandas DataFrame for a bipartite financial network.
     """
     data = HeteroData()
     
     # --- ID Mapping ---
-    # Map string IDs to integer indices
-    # We use a global mapping strategy: unique IDs for customers and unique IDs for banks
     unique_cust_ids = df[customer_id_col].unique()
     unique_bank_ids = df[bank_id_col].unique()
     
     cust_id_map = {id_: i for i, id_ in enumerate(unique_cust_ids)}
     bank_id_map = {id_: i for i, id_ in enumerate(unique_bank_ids)}
     
-    # Add mapped columns to df for easy edge creation
     df['cust_idx'] = df[customer_id_col].map(cust_id_map)
     df['bank_idx'] = df[bank_id_col].map(bank_id_map)
     
     # --- Node Features ---
-    # 1. Customer Features
-    # We need to aggregate features if there are multiple transactions per customer, 
-    # OR we assume the input df has one row per transaction and we need a separate customer feature DF.
-    # The prompt implies 'df' contains everything. 
-    # Usually, node features are static per node. 
-    # For this script, we will take the FIRST occurrence of features for each node to build the node feature matrix.
-    # In a real pipeline, you would perform aggregation (mean/max) preprocessing before this.
-    
     print("Processing Customer Features...")
     cust_df = df.drop_duplicates(subset=[customer_id_col]).set_index(customer_id_col)
-    cust_df = cust_df.reindex(unique_cust_ids) # Ensure order matches indices
+    cust_df = cust_df.reindex(unique_cust_ids)
     
     scaler_cust = StandardScaler()
     cust_x = cust_df[cust_feature_cols].fillna(0).values
     cust_x = scaler_cust.fit_transform(cust_x)
     data['customer'].x = torch.from_numpy(cust_x).float()
     
-    # 2. Bank Account Features
     print("Processing Bank Account Features...")
     bank_df = df.drop_duplicates(subset=[bank_id_col]).set_index(bank_id_col)
     bank_df = bank_df.reindex(unique_bank_ids)
@@ -57,42 +46,25 @@ def prepare_hetero_data(df, customer_id_col, bank_id_col, cust_feature_cols, ban
     bank_x = bank_df[bank_feature_cols].fillna(0).values
     bank_x = scaler_bank.fit_transform(bank_x)
     data['bank_account'].x = torch.from_numpy(bank_x).float()
-    
-    # --- Labels ---
-    if label_col and label_col in df.columns:
-        # Assumes labels are at customer level. 
-        # If a customer is flagged in ANY transaction, we consider them illicit (or take the label from the cust_df)
-        # Using the value from the unique customer dataframe
-        if label_col in cust_df.columns:
-            cust_y = cust_df[label_col].values
-            data['customer'].y = torch.from_numpy(cust_y).float()
-        else:
-            print("Warning: Label column not found in customer-deduplicated data.")
 
     # --- Edge Construction ---
     print("Constructing Edges...")
     
-    # Edge Features
     scaler_edge = StandardScaler()
     edge_attr = df[edge_feature_cols].fillna(0).values
     edge_attr = scaler_edge.fit_transform(edge_attr)
     edge_attr_tensor = torch.from_numpy(edge_attr).float()
     
-    # 1. Customer -> funds -> Bank Account
     src_c = torch.tensor(df['cust_idx'].values, dtype=torch.long)
     dst_b = torch.tensor(df['bank_idx'].values, dtype=torch.long)
     
+    # 1. Customer -> funds -> Bank Account
     data['customer', 'funds', 'bank_account'].edge_index = torch.stack([src_c, dst_b], dim=0)
     data['customer', 'funds', 'bank_account'].edge_attr = edge_attr_tensor
     
     # 2. Bank Account -> pays -> Customer
-    # Creating reverse edges to allow information flow back to customers
-    # We use the same transactions but reversed direction for the graph structure
-    src_b = dst_b
-    dst_c = src_c
-    
-    data['bank_account', 'pays', 'customer'].edge_index = torch.stack([src_b, dst_c], dim=0)
-    data['bank_account', 'pays', 'customer'].edge_attr = edge_attr_tensor # Same features, flows back
+    data['bank_account', 'pays', 'customer'].edge_index = torch.stack([dst_b, src_c], dim=0)
+    data['bank_account', 'pays', 'customer'].edge_attr = edge_attr_tensor
     
     print(f"Graph constructed: {data}")
     return data, cust_id_map
@@ -108,82 +80,52 @@ class UnifiedAMLGNN(torch.nn.Module):
         self.architecture = architecture
         
         self.convs = torch.nn.ModuleList()
-        self.lin = Linear(-1, out_channels)
         
         for _ in range(num_layers):
             conv = self._create_layer(hidden_channels, architecture)
             self.convs.append(conv)
 
     def _create_layer(self, hidden_channels, arch):
-        """
-        Creates a HeteroConv layer based on the selected architecture.
-        Uses (-1, -1) for lazy initialization of input channels.
-        """
         if arch == 'sage':
-            # SAGEConv aggregates neighbor features (mean/max)
             def make_conv(): return SAGEConv((-1, -1), hidden_channels)
         elif arch == 'gat':
-            # GATConv uses attention mechanisms
             def make_conv(): return GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=2, concat=False)
-        elif arch == 'rgcn':
-            # RGCN distinguishes edge types. 
-            # In PyG HeteroConv, we can simulate RGCN behavior by using standard GCN/SAGE 
-            # but having separate weights per relation (which HeteroConv does by default).
-            # True RGCNConv is for homogeneous graphs with edge_type tensor. 
-            # Here we use SAGE as the base for the HeteroConv relations to act as "Relational" convolution.
+        else: # rgcn or others map to sage for simplicity in hetero context
              def make_conv(): return SAGEConv((-1, -1), hidden_channels)
-        else:
-            raise ValueError(f"Unknown architecture: {arch}")
 
         return HeteroConv({
             ('customer', 'funds', 'bank_account'): make_conv(),
             ('bank_account', 'pays', 'customer'): make_conv(),
         }, aggr='sum')
 
-    def forward(self, x_dict, edge_index_dict, edge_attr_dict=None):
-        # x_dict: Dictionary of node features
-        # edge_index_dict: Dictionary of edge indices
-        
+    def forward(self, x_dict, edge_index_dict):
         for i, conv in enumerate(self.convs):
-            # Pass edge_attr if the specific conv supports it (SAGE/GCN usually don't take edge features easily 
-            # without modification, but GAT can. For simplicity in this unified class, we rely on node aggregation.
-            # Extending to edge features requires custom MessagePassing classes.)
             x_dict = conv(x_dict, edge_index_dict)
-            
-            # Apply ReLU and Dropout
             x_dict = {key: F.relu(x) for key, x in x_dict.items()}
             x_dict = {key: F.dropout(x, p=0.5, training=self.training) for key, x in x_dict.items()}
         
-        # We only care about Customer classifications
-        return self.lin(x_dict['customer'])
+        return x_dict
 
 # ==========================================
 # 3. Training & Inference Workflow
 # ==========================================
 
-def train(model, data, epochs=10, lr=0.01):
+def train_unsupervised(model, data, epochs=10, lr=0.01):
+    """
+    Trains the GNN using negative sampling (Link Prediction) to learn structural embeddings.
+    """
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = torch.nn.BCEWithLogitsLoss()
     
-    # NeighborLoader for scalability
-    # We define input nodes as ('customer', mask) if we had a train_mask, 
-    # here we assume all labeled customers are for training for simplicity or passed indices.
-    # We'll use all customers that have a label (which should be all in 'data' if prepared correctly with labels).
+    # We will use the 'customer -> funds -> bank' edge type for link prediction
+    edge_type = ('customer', 'funds', 'bank_account')
     
-    # Create a mask for valid training nodes (nodes with labels)
-    # Check if 'y' exists
-    if not hasattr(data['customer'], 'y'):
-        raise ValueError("Data object has no labels ('y') for training.")
-        
-    labeled_indices = torch.arange(data['customer'].num_nodes)
-    
-    loader = NeighborLoader(
+    # Use LinkNeighborLoader for automatic negative sampling
+    loader = LinkNeighborLoader(
         data,
-        # Sample 10 neighbors for each node for 2 hops
         num_neighbors=[10] * 2,
-        # Use a batch size of 128 for training nodes
         batch_size=128,
-        input_nodes=('customer', labeled_indices),
+        edge_label_index=(edge_type, data[edge_type].edge_index),
+        neg_sampling_ratio=1.0, # 1 negative for every positive
         shuffle=True
     )
 
@@ -195,63 +137,85 @@ def train(model, data, epochs=10, lr=0.01):
         for batch in loader:
             optimizer.zero_grad()
             
-            out = model(batch.x_dict, batch.edge_index_dict)
+            # 1. Forward Pass to get Embeddings
+            x_dict = model(batch.x_dict, batch.edge_index_dict)
             
-            # Helper to match output size with batch labels
-            # The batch size of the seed nodes is defined in batch['customer'].batch_size
-            batch_size = batch['customer'].batch_size
-            out = out[:batch_size].squeeze()
-            target = batch['customer'].y[:batch_size]
+            # 2. Get Score for Edges (both Pos and Neg)
+            # LinkNeighborLoader appends negative samples to edge_label_index
+            # and provides edge_label (1 for pos, 0 for neg)
             
-            loss = criterion(out, target)
+            # The edge_label_index contains the indices of the edges to score
+            # It includes both positive and negative edges if neg_sampling_ratio > 0
+            src, dst = batch[edge_type].edge_label_index
+            
+            # Calculate dot product
+            # Note: The loader returns a subgraph, so indices in edge_label_index 
+            # are mapped to the local batch indices in x_dict
+            out = (x_dict['customer'][src] * x_dict['bank_account'][dst]).sum(dim=-1)
+            
+            # 3. Loss
+            target = batch[edge_type].edge_label
+            loss = F.binary_cross_entropy_with_logits(out, target)
+            
             loss.backward()
             optimizer.step()
             
-            total_loss += loss.item() * batch_size
-            total_examples += batch_size
+            total_loss += loss.item() * src.size(0)
+            total_examples += src.size(0)
             
         print(f"Epoch {epoch+1:03d}: Loss: {total_loss / total_examples:.4f}")
 
     return model
 
-def inference(model, data):
+def inference_anomaly_detection(model, data):
+    """
+    1. Generates embeddings for all customers.
+    2. Uses IsolationForest to detect anomalies in the embedding space.
+    """
     model.eval()
-    # For inference, we can process full graph if it fits in memory, 
-    # or use NeighborLoader again. For 'risk score' output, we want it for ALL customers.
     
+    # Standard NeighborLoader for Node Embeddings
     loader = NeighborLoader(
         data,
-        num_neighbors=[10] * 2, # Same neighbor sampling
+        num_neighbors=[10] * 2,
         batch_size=128,
-        input_nodes=('customer', None), # None means all nodes of this type
+        input_nodes=('customer', None),
         shuffle=False
     )
     
-    all_preds = []
+    all_embeddings = []
     all_indices = []
     
+    print("Generating Embeddings...")
     with torch.no_grad():
         for batch in loader:
-            out = model(batch.x_dict, batch.edge_index_dict)
+            x_dict = model(batch.x_dict, batch.edge_index_dict)
+            
+            # Extract Customer Embeddings
             batch_size = batch['customer'].batch_size
+            emb = x_dict['customer'][:batch_size].cpu().numpy()
             
-            scores = torch.sigmoid(out[:batch_size]).squeeze().cpu().numpy()
-            
-            # If batch_size is 1, scores is scalar 
-            if np.ndim(scores) == 0:
-                scores = [scores]
-                
-            all_preds.extend(scores)
-            # Original node indices are stored in batch.n_id or batch['customer'].n_id
-            # However, NeighborLoader maps global IDs to local batch IDs.
-            # PyG's NeighborLoader preserves original indices in `n_id`
+            all_embeddings.append(emb)
             all_indices.extend(batch['customer'].n_id[:batch_size].cpu().numpy())
             
-    # Combine into a result dict or df
-    # Map back using original indices
+    all_embeddings = np.concatenate(all_embeddings, axis=0)
+    
+    # --- Anomaly Detection ---
+    print("Running Isolation Forest...")
+    iso_forest = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+    # IsolationForest returns -1 for anomalies, 1 for normal
+    # We invert this so higher score = more anomalous
+    scores = -iso_forest.fit_predict(all_embeddings) 
+    
+    # We can also use decision_function for a continuous score (lower is more anomalous)
+    # standardizing to 0-1 risk score would be ideal, but raw decision score works.
+    # decision_function: average anomaly score. Lower is worse.
+    raw_scores = -iso_forest.decision_function(all_embeddings)
+            
     results = pd.DataFrame({
         'cust_idx': all_indices,
-        'risk_score': all_preds
+        'risk_score': raw_scores,
+        'is_anomaly': scores # 1 = anomaly, -1 = normal (after our inversion of IF output)
     })
     return results
 
@@ -260,10 +224,9 @@ def inference(model, data):
 # ==========================================
 
 if __name__ == "__main__":
-    print("--- AML GNN Detection Pipeline ---")
+    print("--- AML GNN Unsupervised Pipeline ---")
     
-    # --- MOCK DATA GENERATION (for standalone execution) ---
-    # In a real scenario, the user would uncomment the pd.read_csv line below.
+    # --- MOCK DATA GENERATION ---
     print("Generating Mock Data...")
     num_tx = 1000
     mock_data = {
@@ -272,25 +235,17 @@ if __name__ == "__main__":
         'bank_account_id': [f'Acct_{np.random.randint(0, 50)}' for _ in range(num_tx)],
         'amount': np.random.rand(num_tx) * 10000,
         'hour_of_day': np.random.randint(0, 24, num_tx),
-        # Customer Features (mocked as repeating columns for simplicity)
         'cust_risk_score': np.random.rand(num_tx),
         'cust_tenure': np.random.randint(1, 365, num_tx),
-        # Bank Features
         'bank_volume': np.random.rand(num_tx) * 100000,
         'bank_flags': np.random.randint(0, 2, num_tx),
-        # Labels (attached to customers, mocked here per transaction but consistent per customer logic needed)
-        'is_laundering': np.random.choice([0, 1], num_tx, p=[0.95, 0.05])
     }
     df = pd.DataFrame(mock_data)
-    
-    # Ensure consistency of labels per customer for the mock
-    cust_labels = df.groupby('customer_name')['is_laundering'].max()
-    df['is_laundering'] = df['customer_name'].map(cust_labels)
 
     # ---------------------------------------------------------
     # USER CONFIGURATION BLOCK
     # ---------------------------------------------------------
-    # df = pd.read_csv('my_data.csv')  # <-- User loads data here
+    # df = pd.read_csv('my_data.csv')
     
     CUSTOMER_ID = 'customer_name'
     BANK_ID = 'bank_account_id'
@@ -298,39 +253,37 @@ if __name__ == "__main__":
     CUSTOMER_FEATURES = ['cust_risk_score', 'cust_tenure']
     BANK_FEATURES = ['bank_volume', 'bank_flags']
     EDGE_FEATURES = ['amount', 'hour_of_day']
-    LABEL_COL = 'is_laundering'
     
-    MODEL_CHOICE = 'sage' # Options: 'sage', 'gat', 'rgcn'
+    MODEL_CHOICE = 'sage' 
     # ---------------------------------------------------------
     
     # 1. Prepare Data
     print("Preparing Graph Data...")
     hetero_data, cust_mapping = prepare_hetero_data(
         df, CUSTOMER_ID, BANK_ID, 
-        CUSTOMER_FEATURES, BANK_FEATURES, EDGE_FEATURES, 
-        LABEL_COL
+        CUSTOMER_FEATURES, BANK_FEATURES, EDGE_FEATURES
     )
     
     # 2. Initialize Model
     print(f"Initializing {MODEL_CHOICE.upper()} Model...")
     model = UnifiedAMLGNN(
         hidden_channels=64, 
-        out_channels=1, 
+        out_channels=64, # Output embedding dimension
         num_layers=2, 
         architecture=MODEL_CHOICE
     )
     
-    # 3. Train
-    print("Starting Training...")
-    model = train(model, hetero_data, epochs=5, lr=0.01)
+    # 3. Train (Unsupervised)
+    print("Starting Unsupervised Training...")
+    model = train_unsupervised(model, hetero_data, epochs=5, lr=0.01)
     
-    # 4. Inference
-    print("Running Inference...")
-    risk_scores = inference(model, hetero_data)
+    # 4. Inference (Anomaly Detection)
+    print("Running Anomaly Detection...")
+    risk_scores = inference_anomaly_detection(model, hetero_data)
     
     # Map back to IDs
     inv_cust_map = {v: k for k, v in cust_mapping.items()}
     risk_scores['customer_id'] = risk_scores['cust_idx'].map(inv_cust_map)
     
-    print("\n--- Risk Scoring Results (Top 5 High Risk) ---")
+    print("\n--- Top Anomalies Detected ---")
     print(risk_scores.sort_values('risk_score', ascending=False).head())
