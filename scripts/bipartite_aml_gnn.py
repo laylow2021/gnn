@@ -219,6 +219,50 @@ def inference_anomaly_detection(model, data):
     })
     return results
 
+def train_full_batch(model, data, epochs=10, lr=0.01):
+    """
+    Fallback training loop that processes the entire graph at once.
+    Useful when 'torch-sparse' or 'pyg-lib' are not available for efficient sampling.
+    """
+    print("\n--- Running Full-Batch Training (Fallback) ---")
+    print("Warning: This requires enough memory to hold the entire graph/embeddings.")
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    edge_type = ('customer', 'funds', 'bank_account')
+    
+    # Create negative edges for the entire graph upfront (simple random approximation)
+    # In a real full-batch scenario, we might resample these every epoch or use a smaller subset
+    # For simplicity/speed in fallback mode, we assume the graph fits in memory.
+    
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        
+        # 1. Forward Pass (Full Graph)
+        x_dict = model(data.x_dict, data.edge_index_dict)
+        
+        # 2. Score Positive Edges
+        # Use all existing edges
+        src, dst = data[edge_type].edge_index
+        pos_out = (x_dict['customer'][src] * x_dict['bank_account'][dst]).sum(dim=-1)
+        
+        # 3. Score Negative Edges
+        # Randomly sample negatives (same amount as positives)
+        neg_dst = torch.randint(0, data['bank_account'].num_nodes, (src.size(0),), device=src.device)
+        neg_out = (x_dict['customer'][src] * x_dict['bank_account'][neg_dst]).sum(dim=-1)
+        
+        # 4. Loss
+        pos_loss = F.binary_cross_entropy_with_logits(pos_out, torch.ones_like(pos_out))
+        neg_loss = F.binary_cross_entropy_with_logits(neg_out, torch.zeros_like(neg_out))
+        
+        loss = pos_loss + neg_loss
+        loss.backward()
+        optimizer.step()
+        
+        print(f"Epoch {epoch+1:03d}: Loss: {loss.item():.4f}")
+        
+    return model
+
 # ==========================================
 # 4. User Configuration & Execution
 # ==========================================
@@ -273,14 +317,43 @@ if __name__ == "__main__":
         architecture=MODEL_CHOICE
     )
     
-    # 3. Train (Unsupervised)
+    # 3. Train
     print("Starting Unsupervised Training...")
-    model = train_unsupervised(model, hetero_data, epochs=5, lr=0.01)
+    try:
+        # Try using the efficient loader first
+        model = train_unsupervised(model, hetero_data, epochs=5, lr=0.01)
+    except (ImportError, OSError, RuntimeError) as e:
+        print(f"\n[!] Loader-based training failed: {e}")
+        print("[*] Switching to Full-Batch training (Native PyTorch mode).")
+        model = train_full_batch(model, hetero_data, epochs=5, lr=0.01)
     
     # 4. Inference (Anomaly Detection)
     print("Running Anomaly Detection...")
-    risk_scores = inference_anomaly_detection(model, hetero_data)
-    
+    # Inference also normally uses loader, but for full-batch fallback we can pass full graph
+    # We'll try loader first, then fallback to direct forward pass
+    try:
+        risk_scores = inference_anomaly_detection(model, hetero_data)
+    except:
+         print("[*] Using Full-Batch Inference")
+         model.eval()
+         with torch.no_grad():
+             x_dict = model(hetero_data.x_dict, hetero_data.edge_index_dict)
+             emb = x_dict['customer'].cpu().numpy()
+             
+             iso_forest = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+             scores = -iso_forest.fit_predict(emb)
+             raw_scores = -iso_forest.decision_function(emb)
+             
+             inv_cust_map = {v: k for k, v in cust_mapping.items()}
+             risk_scores = pd.DataFrame({
+                'cust_idx': list(inv_cust_map.keys()), # Assuming mapped 0..N
+                'risk_score': raw_scores,
+                'is_anomaly': scores 
+             })
+             # We need to ensure indices match the order. 
+             # In full batch, x_dict['customer'] is ordered 0..N
+             risk_scores['cust_idx'] = range(len(risk_scores))
+
     # Map back to IDs
     inv_cust_map = {v: k for k, v in cust_mapping.items()}
     risk_scores['customer_id'] = risk_scores['cust_idx'].map(inv_cust_map)
