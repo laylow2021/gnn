@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import SAGEConv, GATConv, HeteroConv, Linear
+from torch_geometric.nn import SAGEConv, GATConv, GraphConv, HeteroConv, Linear
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Tuple, Union
@@ -17,7 +17,7 @@ class BehaviorGraphBuilder:
     def __init__(self, config: Dict):
         """
         Args:
-            config: Configuration dict.
+            config:
                 Mappings:
                     'customer': col_name
                     'amount': col_name
@@ -29,6 +29,8 @@ class BehaviorGraphBuilder:
                                    Increases temporal fuzzy matching.
                     'amount_bins': list[float]. Custom bin edges for amount discretization.
                                    Controls strictness of amount similarity.
+                    'customer_feature_cols': list[str] (Optional). Columns to use as node features.
+                                             If None, uses simple Transaction Count.
         """
         self.config = config
         self.cust_map = {}
@@ -46,34 +48,47 @@ class BehaviorGraphBuilder:
         self.cust_map = {id_: i for i, id_ in enumerate(unique_cust)}
         df['cust_idx'] = df[cust_col].map(self.cust_map)
         
-        # Simple Customer Features
-        cust_feats = df.groupby(cust_col).size().to_frame('count')
-        scaler = StandardScaler()
-        cust_x = scaler.fit_transform(cust_feats.values)
-        data['customer'].x = torch.from_numpy(cust_x).float()
+        # Custom Customer Features
+        feat_cols = self.config.get('customer_feature_cols')
+        if feat_cols:
+            cust_feats = df.groupby(cust_col)[feat_cols].mean()
+            cust_feats = cust_feats.reindex(unique_cust).fillna(0)
+            scaler = StandardScaler()
+            cust_x = scaler.fit_transform(cust_feats.values)
+            data['customer'].x = torch.from_numpy(cust_x).float()
+        else:
+            cust_feats = df.groupby(cust_col).size().to_frame('count')
+            cust_feats = cust_feats.reindex(unique_cust).fillna(0)
+            scaler = StandardScaler()
+            cust_x = scaler.fit_transform(cust_feats.values)
+            data['customer'].x = torch.from_numpy(cust_x).float()
+        
+        # Pre-calc weights if amount exists
+        weights = None
+        if 'amount' in self.config and self.config['amount'] in df.columns:
+            # Transformation: Log scale to compress range
+            amt = df[self.config['amount']]
+            log_amt = np.log1p(amt)
+            # Normalize to 0-1 range approx
+            weights = torch.tensor(log_amt.values / log_amt.max(), dtype=torch.float)
         
         # 2. Behavioral Nodes
         
         # A. Bank Entity
         if 'bank' in self.config and self.config['bank'] in df.columns:
-            self._add_simple_node_type(data, df, 'bank', self.config['bank'], 'uses_bank')
+            self._add_simple_node_type(data, df, 'bank', self.config['bank'], 'uses_bank', weights)
 
         # B. Amount Binning
         if 'amount' in self.config and self.config['amount'] in df.columns:
             amt_col = self.config['amount']
-            
-            # User-defined bins or default
             bins = self.config.get('amount_bins', [-1, 100, 1000, 5000, 9000, 10000, 100000, float('inf')])
-            
-            # Generate labels (N bins -> N-1 labels)
             labels = [f"Bin_{i}" for i in range(len(bins)-1)]
-            
             df['amt_bin'] = pd.cut(df[amt_col], bins=bins, labels=labels).astype(str)
             
             if 'direction' in self.config and self.config['direction'] in df.columns:
                 df['amt_bin'] = df[self.config['direction']].astype(str) + "_" + df['amt_bin']
             
-            self._add_simple_node_type(data, df, 'amount_bin', 'amt_bin', 'transacts_vol')
+            self._add_simple_node_type(data, df, 'amount_bin', 'amt_bin', 'transacts_vol', weights)
 
         # C. Date Nodes (Synchronized Days)
         if 'date' in self.config and self.config['date'] in df.columns:
@@ -83,56 +98,54 @@ class BehaviorGraphBuilder:
             # --- Absolute Date (With Sliding Window) ---
             df['abs_date'] = df[date_col].dt.date.astype(str)
             
-            # 1. Create Mapping for ALL dates
             unique_dates = df['abs_date'].unique()
             date_map = {val: i for i, val in enumerate(unique_dates)}
             self.node_maps['date'] = date_map
             
-            # Feature initialization
             data['date'].x = torch.eye(len(unique_dates)) if len(unique_dates) < 100 else torch.randn(len(unique_dates), 16)
             
-            # 2. Create Edges with Sliding Window
             window = self.config.get('date_window', 0)
+            src_list, dst_list, w_list = [], [], []
             
-            src_list = []
-            dst_list = []
-            
-            # Iterate offsets: -window ... 0 ... +window
             for offset in range(-window, window + 1):
-                # Calculate target dates
                 target_dates = (df[date_col] + pd.Timedelta(days=offset)).dt.date.astype(str)
-                
-                # Map to indices (filter out dates that don't exist in our node set)
-                # We map to the SAME date_map created from observed data
                 mapped_dst = target_dates.map(date_map)
-                
-                # Keep valid
                 mask = mapped_dst.notna()
                 
                 valid_src = torch.tensor(df.loc[mask, 'cust_idx'].values, dtype=torch.long)
                 valid_dst = torch.tensor(mapped_dst[mask].values.astype(int), dtype=torch.long)
+                
+                if weights is not None:
+                    # Decay factor: 1.0 for exact day, 0.5 for neighbors
+                    decay = 1.0 / (abs(offset) + 1.0)
+                    valid_w = weights[torch.tensor(mask.values)] * decay
+                    w_list.append(valid_w)
                 
                 src_list.append(valid_src)
                 dst_list.append(valid_dst)
                 
             final_src = torch.cat(src_list)
             final_dst = torch.cat(dst_list)
+            final_w = torch.cat(w_list) if w_list else None
             
-            # Add to graph
             data['customer', 'active_on_date', 'date'].edge_index = torch.stack([final_src, final_dst], dim=0)
+            if final_w is not None:
+                data['customer', 'active_on_date', 'date'].edge_weight = final_w
+                
             data['date', 'rev_active_on_date', 'customer'].edge_index = torch.stack([final_dst, final_src], dim=0)
+            if final_w is not None:
+                data['date', 'rev_active_on_date', 'customer'].edge_weight = final_w
             
-            # --- Cycle Nodes (No Window needed usually) ---
+            # --- Cycle Nodes ---
             df['day_of_month'] = df[date_col].dt.day.astype(str)
-            self._add_simple_node_type(data, df, 'day_of_month', 'day_of_month', 'active_on_day')
+            self._add_simple_node_type(data, df, 'day_of_month', 'day_of_month', 'active_on_day', weights)
             
             df['day_of_week'] = df[date_col].dt.day_name().astype(str)
-            self._add_simple_node_type(data, df, 'day_of_week', 'day_of_week', 'active_on_weekday')
+            self._add_simple_node_type(data, df, 'day_of_week', 'day_of_week', 'active_on_weekday', weights)
 
         return data
 
-    def _add_simple_node_type(self, data: HeteroData, df: pd.DataFrame, node_name: str, col_name: str, edge_name: str):
-        """Helper for 1:1 mappings."""
+    def _add_simple_node_type(self, data: HeteroData, df: pd.DataFrame, node_name: str, col_name: str, edge_name: str, weights: Optional[torch.Tensor] = None):
         unique_vals = df[col_name].unique()
         mapping = {val: i for i, val in enumerate(unique_vals)}
         self.node_maps[node_name] = mapping
@@ -142,14 +155,21 @@ class BehaviorGraphBuilder:
         src = torch.tensor(df['cust_idx'].values, dtype=torch.long)
         dst = torch.tensor(df[col_name].map(mapping).values, dtype=torch.long)
         
+        # Forward
         data['customer', edge_name, node_name].edge_index = torch.stack([src, dst], dim=0)
+        if weights is not None:
+            data['customer', edge_name, node_name].edge_weight = weights
+            
+        # Reverse
         data[node_name, f'rev_{edge_name}', 'customer'].edge_index = torch.stack([dst, src], dim=0)
+        if weights is not None:
+            data[node_name, f'rev_{edge_name}', 'customer'].edge_weight = weights
 
 
 class BehavioralGNN(torch.nn.Module):
     """
     GNN Architecture that aggregates signals from multiple behavioral node types.
-    Supports 'sage' (GraphSAGE) and 'gat' (Graph Attention) architectures.
+    Supports 'sage' (mapped to GraphConv for weighted bipartite support) and 'gat'.
     """
     def __init__(self, data_metadata, hidden_channels=64, out_channels=64, num_layers=2, architecture='sage'):
         super().__init__()
@@ -160,38 +180,53 @@ class BehavioralGNN(torch.nn.Module):
         for _ in range(num_layers):
             conv_dict = {}
             for edge_type in data_metadata[1]:
-                # edge_type is (src_type, rel_type, dst_type)
                 if self.architecture == 'gat':
-                    # GAT: Uses attention mechanisms to weigh neighbors
-                    # add_self_loops=False is critical for bipartite graphs
                     conv_dict[edge_type] = GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=1, concat=False)
                 else:
-                    # SAGE: Standard mean/sum aggregation (Robust & Fast)
-                    conv_dict[edge_type] = SAGEConv((-1, -1), hidden_channels)
+                    # GraphConv supports both bipartite and edge_weight
+                    conv_dict[edge_type] = GraphConv((-1, -1), hidden_channels)
             
             self.convs.append(HeteroConv(conv_dict, aggr='sum'))
 
-    def forward(self, x_dict, edge_index_dict):
+    def forward(self, x_dict, edge_index_dict, edge_weight_dict=None):
+        """
+        Args:
+            edge_weight_dict: Dictionary of edge weights for each edge type.
+        """
         for conv in self.convs:
-            x_dict = conv(x_dict, edge_index_dict)
+            # Only pass weight dicts if they are provided
+            kwargs = {}
+            if edge_weight_dict is not None:
+                if self.architecture == 'gat':
+                    kwargs['edge_attr_dict'] = edge_weight_dict
+                else:
+                    kwargs['edge_weight_dict'] = edge_weight_dict
+            
+            x_dict = conv(x_dict, edge_index_dict, **kwargs)
             x_dict = {key: F.relu(x) for key, x in x_dict.items()}
         
         # Apply projection head to Customer nodes
         x_dict['customer'] = self.lin(x_dict['customer'])
         return x_dict
 
+def get_edge_weight_dict(data):
+    edge_weight_dict = {}
+    for edge_type in data.edge_types:
+        if 'edge_weight' in data[edge_type]:
+            edge_weight_dict[edge_type] = data[edge_type].edge_weight
+    return edge_weight_dict if edge_weight_dict else None
+
 def train_behavior_gnn(model, data, epochs=10, lr=0.01):
-    """
-    Full-batch unsupervised training using Link Prediction.
-    """
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     model.train()
     
     target_edge_types = [et for et in data.edge_types if et[0] == 'customer']
+    edge_weight_dict = get_edge_weight_dict(data)
     
     for epoch in range(epochs):
         optimizer.zero_grad()
-        x_dict = model(data.x_dict, data.edge_index_dict)
+        
+        x_dict = model(data.x_dict, data.edge_index_dict, edge_weight_dict)
         
         total_loss = 0
         
@@ -214,12 +249,11 @@ def train_behavior_gnn(model, data, epochs=10, lr=0.01):
     return model
 
 def detect_behavioral_anomalies(model, data, cust_map):
-    """
-    Run inference and anomaly detection.
-    """
     model.eval()
+    edge_weight_dict = get_edge_weight_dict(data)
+    
     with torch.no_grad():
-        x_dict = model(data.x_dict, data.edge_index_dict)
+        x_dict = model(data.x_dict, data.edge_index_dict, edge_weight_dict)
         emb = x_dict['customer'].cpu().numpy()
         
     iso = IsolationForest(contamination=0.05, random_state=42)
