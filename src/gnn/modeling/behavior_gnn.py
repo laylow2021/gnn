@@ -31,6 +31,8 @@ class BehaviorGraphBuilder:
                                         Aggregates time nodes to coarser buckets to prevent sparsity.
                     'amount_bins': list[float]. Custom bin edges for amount discretization.
                                    Controls strictness of amount similarity.
+                    'amount_bin_direction_split': bool (Default True). If True, separates 'IN_Bin_X' from 'OUT_Bin_X'.
+                                                  Set False to link Senders and Receivers of similar amounts.
                     'customer_feature_cols': list[str] (Optional). Columns to use as node features.
                                              If None, uses simple Transaction Count.
         """
@@ -87,8 +89,10 @@ class BehaviorGraphBuilder:
             labels = [f"Bin_{i}" for i in range(len(bins)-1)]
             df['amt_bin'] = pd.cut(df[amt_col], bins=bins, labels=labels).astype(str)
             
-            if 'direction' in self.config and self.config['direction'] in df.columns:
-                df['amt_bin'] = df[self.config['direction']].astype(str) + "_" + df['amt_bin']
+            # Optional Direction Split (Default True)
+            if self.config.get('amount_bin_direction_split', True):
+                if 'direction' in self.config and self.config['direction'] in df.columns:
+                    df['amt_bin'] = df[self.config['direction']].astype(str) + "_" + df['amt_bin']
             
             self._add_simple_node_type(data, df, 'amount_bin', 'amt_bin', 'transacts_vol', weights)
 
@@ -101,50 +105,36 @@ class BehaviorGraphBuilder:
             granularity = self.config.get('date_granularity', 'day').lower()
             
             if granularity == 'week':
-                # Convert to Week string (e.g. "2024-W01")
                 df['abs_date'] = df[date_col].dt.to_period('W').astype(str)
-                # For simplicity, if coarsening to week, we disable day-window sliding
                 window = 0 
             elif granularity == 'month':
                 df['abs_date'] = df[date_col].dt.to_period('M').astype(str)
                 window = 0
             else:
-                # Default 'day'
                 df['abs_date'] = df[date_col].dt.date.astype(str)
                 window = self.config.get('date_window', 0)
             
-            # 1. Create Mapping for ALL dates
             unique_dates = df['abs_date'].unique()
             date_map = {val: i for i, val in enumerate(unique_dates)}
             self.node_maps['date'] = date_map
             
-            # Feature initialization
             data['date'].x = torch.eye(len(unique_dates)) if len(unique_dates) < 100 else torch.randn(len(unique_dates), 16)
             
             src_list, dst_list, w_list = [], [], []
             
-            # Iterate offsets: -window ... 0 ... +window (Only active if granularity='day')
             for offset in range(-window, window + 1):
-                # Calculate target dates
                 if offset == 0:
                     target_dates = df['abs_date']
                 else:
-                    # Only supported for daily granularity sliding
                     target_dates = (df[date_col] + pd.Timedelta(days=offset)).dt.date.astype(str)
                 
-                # Map to indices (filter out dates that don't exist in our node set)
-                # We map to the SAME date_map created from observed data
                 mapped_dst = target_dates.map(date_map)
-                
-                # Keep valid
                 mask = mapped_dst.notna()
                 
                 valid_src = torch.tensor(df.loc[mask, 'cust_idx'].values, dtype=torch.long)
                 valid_dst = torch.tensor(mapped_dst[mask].values.astype(int), dtype=torch.long)
                 
-                # Weight logic
                 if weights is not None:
-                    # Decay factor: 1.0 for exact day, 0.5 for neighbors
                     decay = 1.0 / (abs(offset) + 1.0)
                     valid_w = weights[torch.tensor(mask.values)] * decay
                     w_list.append(valid_w)
@@ -156,18 +146,15 @@ class BehaviorGraphBuilder:
             final_dst = torch.cat(dst_list)
             final_w = torch.cat(w_list) if w_list else None
             
-            # Add to graph (Forward)
             data['customer', 'active_on_date', 'date'].edge_index = torch.stack([final_src, final_dst], dim=0)
             if final_w is not None:
                 data['customer', 'active_on_date', 'date'].edge_weight = final_w
                 
-            # Reverse Edge (Share same weight)
             data['date', 'rev_active_on_date', 'customer'].edge_index = torch.stack([final_dst, final_src], dim=0)
             if final_w is not None:
                 data['date', 'rev_active_on_date', 'customer'].edge_weight = final_w
             
             # --- Cycle Nodes ---
-            # Keep Cycle nodes independent of granularity (useful for seasonality)
             df['day_of_month'] = df[date_col].dt.day.astype(str)
             self._add_simple_node_type(data, df, 'day_of_month', 'day_of_month', 'active_on_day', weights)
             
@@ -177,7 +164,6 @@ class BehaviorGraphBuilder:
         return data
 
     def _add_simple_node_type(self, data: HeteroData, df: pd.DataFrame, node_name: str, col_name: str, edge_name: str, weights: Optional[torch.Tensor] = None):
-        """Helper for 1:1 mappings."""
         unique_vals = df[col_name].unique()
         mapping = {val: i for i, val in enumerate(unique_vals)}
         self.node_maps[node_name] = mapping
@@ -187,22 +173,16 @@ class BehaviorGraphBuilder:
         src = torch.tensor(df['cust_idx'].values, dtype=torch.long)
         dst = torch.tensor(df[col_name].map(mapping).values, dtype=torch.long)
         
-        # Forward
         data['customer', edge_name, node_name].edge_index = torch.stack([src, dst], dim=0)
         if weights is not None:
             data['customer', edge_name, node_name].edge_weight = weights
             
-        # Reverse
         data[node_name, f'rev_{edge_name}', 'customer'].edge_index = torch.stack([dst, src], dim=0)
         if weights is not None:
             data[node_name, f'rev_{edge_name}', 'customer'].edge_weight = weights
 
 
 class BehavioralGNN(torch.nn.Module):
-    """
-    GNN Architecture that aggregates signals from multiple behavioral node types.
-    Supports 'sage' (mapped to GraphConv for weighted bipartite support) and 'gat'.
-    """
     def __init__(self, data_metadata, hidden_channels=64, out_channels=64, num_layers=2, architecture='sage'):
         super().__init__()
         self.convs = torch.nn.ModuleList()
@@ -215,14 +195,12 @@ class BehavioralGNN(torch.nn.Module):
                 if self.architecture == 'gat':
                     conv_dict[edge_type] = GATConv((-1, -1), hidden_channels, add_self_loops=False, heads=1, concat=False)
                 else:
-                    # GraphConv supports both bipartite and edge_weight
                     conv_dict[edge_type] = GraphConv((-1, -1), hidden_channels)
             
             self.convs.append(HeteroConv(conv_dict, aggr='sum'))
 
     def forward(self, x_dict, edge_index_dict, edge_weight_dict=None):
         for conv in self.convs:
-            # Handle argument naming difference
             kwargs = {}
             if edge_weight_dict is not None:
                 if self.architecture == 'gat':
@@ -244,7 +222,6 @@ def get_edge_weight_dict(data):
     return edge_weight_dict if edge_weight_dict else None
 
 def set_seed(seed=42):
-    """Sets the seed for reproducibility."""
     import random
     random.seed(seed)
     np.random.seed(seed)
@@ -264,9 +241,7 @@ def train_behavior_gnn(model, data, epochs=10, lr=0.01):
     
     for epoch in range(epochs):
         optimizer.zero_grad()
-        
         x_dict = model(data.x_dict, data.edge_index_dict, edge_weight_dict)
-        
         total_loss = 0
         
         for et in target_edge_types:
@@ -287,59 +262,9 @@ def train_behavior_gnn(model, data, epochs=10, lr=0.01):
         
     return model
 
-def detect_behavioral_anomalies(model, data, cust_map, contamination=0.05):
-    model.eval()
-    edge_weight_dict = get_edge_weight_dict(data)
-    
-    with torch.no_grad():
-        x_dict = model(data.x_dict, data.edge_index_dict, edge_weight_dict)
-        emb = x_dict['customer'].cpu().numpy()
-        
-    iso = IsolationForest(contamination=contamination, random_state=42)
-    scores = -iso.fit_predict(emb)
-    raw_scores = -iso.decision_function(emb)
-    
-    inv_map = {v: k for k, v in cust_map.items()}
-    
-    results = pd.DataFrame({
-        'cust_idx': range(len(emb)),
-        'risk_score': raw_scores,
-        'is_anomaly': scores
-    })
-    results['customer_id'] = results['cust_idx'].map(inv_map)
-    return results
-
 def find_strongly_connected_peers(data, cust_map, min_shared_nodes=2):
-    """
-    Identifies customer pairs connected by shared behavioral nodes.
-    Uses native PyTorch sparse matrix multiplication (A @ A.T) to project
-    the bipartite graph into a Customer-Customer similarity graph.
-    
-    Args:
-        data: HeteroData object.
-        cust_map: Dictionary mapping customer IDs to indices.
-        min_shared_nodes: Minimum number of shared behaviors to qualify as a link.
-    
-    Returns:
-        DataFrame of connected pairs.
-    """
     num_customers = data['customer'].num_nodes
-    
-    # We will accumulate the adjacency count in a dense tensor or sparse approach
-    # Since N_customers can be large, we iterate per edge type and accumulate indices
-    # However, standard torch.sparse.mm output is dense or sparse depending on config.
-    # For very large N, we might need to stick to processing edge lists manually if memory is tight.
-    # Here we use a robust edge-list approach compatible with native python/torch.
-    
     edge_types = [et for et in data.edge_types if et[0] == 'customer']
-    
-    # Store all (u, v) pairs where u shares a node with v
-    # This can get huge, so we filter early.
-    
-    # Efficient approach without A@A.T (which explodes memory on CPU):
-    # 1. For each behavior node, find list of connected customers.
-    # 2. Generate pairs from that list.
-    # 3. Count pairs.
     
     from collections import defaultdict
     pair_counts = defaultdict(int)
@@ -347,65 +272,32 @@ def find_strongly_connected_peers(data, cust_map, min_shared_nodes=2):
     print("Analyzing shared behaviors (Native Mode)...")
     
     for et in edge_types:
-        src_type, _, dst_type = et
         src, dst = data[et].edge_index
-        
-        # Group by destination (Behavior Node)
-        # dst_to_srcs = { behavior_id: [cust_id, cust_id...] }
-        # To do this efficiently with tensors:
-        
-        # Sort by dst to group them
         sort_idx = torch.argsort(dst)
         sorted_dst = dst[sort_idx]
         sorted_src = src[sort_idx]
-        
-        # Iterate unique behaviors
         unique_b, counts = torch.unique(sorted_dst, return_counts=True)
-        
-        # We only care about behaviors connected to >1 customer (otherwise no pairs)
-        # and < 1000 customers (otherwise it's a supernode/noise)
         valid_mask = (counts > 1) & (counts < 1000) 
-        valid_b = unique_b[valid_mask]
         
-        # Pre-calculate start indices
-        # This part requires a bit of logic or looping. 
-        # For simplicity in native python without scatter libraries:
-        
-        # Convert to numpy for fast iteration
         curr_dst = sorted_dst.numpy()
         curr_src = sorted_src.numpy()
-        
-        # Find boundaries
         _, indices = np.unique(curr_dst, return_index=True)
-        # Append end index
         indices = np.append(indices, len(curr_dst))
         
-        # Iterate behaviors
         for i in range(len(indices) - 1):
             start = indices[i]
             end = indices[i+1]
-            if end - start < 2 or end - start > 100: # Filter supernodes
-                continue
-                
+            if end - start < 2 or end - start > 100: continue
             customers_in_bucket = curr_src[start:end]
-            
-            # Generate pairs (Combinations)
-            # Since size is small (filtered above), double loop is fine
             for idx_i in range(len(customers_in_bucket)):
                 for idx_j in range(idx_i + 1, len(customers_in_bucket)):
                     u = customers_in_bucket[idx_i]
                     v = customers_in_bucket[idx_j]
-                    
-                    # Store as tuple (min, max) to ignore direction
-                    if u < v:
-                        pair_counts[(u, v)] += 1
-                    else:
-                        pair_counts[(v, u)] += 1
+                    if u < v: pair_counts[(u, v)] += 1
+                    else: pair_counts[(v, u)] += 1
 
-    # Format results
     inv_map = {v: k for k, v in cust_map.items()}
     results = []
-    
     for (u, v), count in pair_counts.items():
         if count >= min_shared_nodes:
             results.append({
@@ -417,5 +309,22 @@ def find_strongly_connected_peers(data, cust_map, min_shared_nodes=2):
     df_res = pd.DataFrame(results)
     if not df_res.empty:
         df_res = df_res.sort_values('Shared_Behaviors', ascending=False)
-        
     return df_res
+
+def detect_behavioral_anomalies(model, data, cust_map, contamination=0.05):
+    model.eval()
+    edge_weight_dict = get_edge_weight_dict(data)
+    with torch.no_grad():
+        x_dict = model(data.x_dict, data.edge_index_dict, edge_weight_dict)
+        emb = x_dict['customer'].cpu().numpy()
+    iso = IsolationForest(contamination=contamination, random_state=42)
+    scores = -iso.fit_predict(emb)
+    raw_scores = -iso.decision_function(emb)
+    inv_map = {v: k for k, v in cust_map.items()}
+    results = pd.DataFrame({
+        'cust_idx': range(len(emb)),
+        'risk_score': raw_scores,
+        'is_anomaly': scores
+    })
+    results['customer_id'] = results['cust_idx'].map(inv_map)
+    return results
