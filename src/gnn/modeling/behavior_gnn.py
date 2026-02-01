@@ -1,23 +1,12 @@
 import pandas as pd
 import numpy as np
 import torch
-import random
 import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import SAGEConv, GATConv, GraphConv, HeteroConv, Linear
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Tuple, Union
-
-def set_seed(seed=42):
-    """Sets the seed for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    print(f"Random seed set to: {seed}")
 
 class BehaviorGraphBuilder:
     """
@@ -38,6 +27,8 @@ class BehaviorGraphBuilder:
                 Parameters:
                     'date_window': int (Default 0). Connects transaction to T +/- window days.
                                    Increases temporal fuzzy matching.
+                    'date_granularity': str ('day', 'week', 'month'). Default 'day'.
+                                        Aggregates time nodes to coarser buckets to prevent sparsity.
                     'amount_bins': list[float]. Custom bin edges for amount discretization.
                                    Controls strictness of amount similarity.
                     'customer_feature_cols': list[str] (Optional). Columns to use as node features.
@@ -80,7 +71,7 @@ class BehaviorGraphBuilder:
             # Transformation: Log scale to compress range
             amt = df[self.config['amount']]
             log_amt = np.log1p(amt)
-            # Normalize to 0-1 range approx
+            # Normalize to 0-1 range approx to keep gradients stable
             weights = torch.tensor(log_amt.values / log_amt.max(), dtype=torch.float)
         
         # 2. Behavioral Nodes
@@ -106,26 +97,52 @@ class BehaviorGraphBuilder:
             date_col = self.config['date']
             df[date_col] = pd.to_datetime(df[date_col])
             
-            # --- Absolute Date (With Sliding Window) ---
-            df['abs_date'] = df[date_col].dt.date.astype(str)
+            # --- Granularity Logic ---
+            granularity = self.config.get('date_granularity', 'day').lower()
             
+            if granularity == 'week':
+                # Convert to Week string (e.g. "2024-W01")
+                df['abs_date'] = df[date_col].dt.to_period('W').astype(str)
+                # For simplicity, if coarsening to week, we disable day-window sliding
+                window = 0 
+            elif granularity == 'month':
+                df['abs_date'] = df[date_col].dt.to_period('M').astype(str)
+                window = 0
+            else:
+                # Default 'day'
+                df['abs_date'] = df[date_col].dt.date.astype(str)
+                window = self.config.get('date_window', 0)
+            
+            # 1. Create Mapping for ALL dates
             unique_dates = df['abs_date'].unique()
             date_map = {val: i for i, val in enumerate(unique_dates)}
             self.node_maps['date'] = date_map
             
+            # Feature initialization
             data['date'].x = torch.eye(len(unique_dates)) if len(unique_dates) < 100 else torch.randn(len(unique_dates), 16)
             
-            window = self.config.get('date_window', 0)
             src_list, dst_list, w_list = [], [], []
             
+            # Iterate offsets: -window ... 0 ... +window (Only active if granularity='day')
             for offset in range(-window, window + 1):
-                target_dates = (df[date_col] + pd.Timedelta(days=offset)).dt.date.astype(str)
+                # Calculate target dates
+                if offset == 0:
+                    target_dates = df['abs_date']
+                else:
+                    # Only supported for daily granularity sliding
+                    target_dates = (df[date_col] + pd.Timedelta(days=offset)).dt.date.astype(str)
+                
+                # Map to indices (filter out dates that don't exist in our node set)
+                # We map to the SAME date_map created from observed data
                 mapped_dst = target_dates.map(date_map)
+                
+                # Keep valid
                 mask = mapped_dst.notna()
                 
                 valid_src = torch.tensor(df.loc[mask, 'cust_idx'].values, dtype=torch.long)
                 valid_dst = torch.tensor(mapped_dst[mask].values.astype(int), dtype=torch.long)
                 
+                # Weight logic
                 if weights is not None:
                     # Decay factor: 1.0 for exact day, 0.5 for neighbors
                     decay = 1.0 / (abs(offset) + 1.0)
@@ -139,15 +156,18 @@ class BehaviorGraphBuilder:
             final_dst = torch.cat(dst_list)
             final_w = torch.cat(w_list) if w_list else None
             
+            # Add to graph (Forward)
             data['customer', 'active_on_date', 'date'].edge_index = torch.stack([final_src, final_dst], dim=0)
             if final_w is not None:
                 data['customer', 'active_on_date', 'date'].edge_weight = final_w
                 
+            # Reverse Edge (Share same weight)
             data['date', 'rev_active_on_date', 'customer'].edge_index = torch.stack([final_dst, final_src], dim=0)
             if final_w is not None:
                 data['date', 'rev_active_on_date', 'customer'].edge_weight = final_w
             
             # --- Cycle Nodes ---
+            # Keep Cycle nodes independent of granularity (useful for seasonality)
             df['day_of_month'] = df[date_col].dt.day.astype(str)
             self._add_simple_node_type(data, df, 'day_of_month', 'day_of_month', 'active_on_day', weights)
             
@@ -157,6 +177,7 @@ class BehaviorGraphBuilder:
         return data
 
     def _add_simple_node_type(self, data: HeteroData, df: pd.DataFrame, node_name: str, col_name: str, edge_name: str, weights: Optional[torch.Tensor] = None):
+        """Helper for 1:1 mappings."""
         unique_vals = df[col_name].unique()
         mapping = {val: i for i, val in enumerate(unique_vals)}
         self.node_maps[node_name] = mapping
@@ -200,12 +221,8 @@ class BehavioralGNN(torch.nn.Module):
             self.convs.append(HeteroConv(conv_dict, aggr='sum'))
 
     def forward(self, x_dict, edge_index_dict, edge_weight_dict=None):
-        """
-        Args:
-            edge_weight_dict: Dictionary of edge weights for each edge type.
-        """
         for conv in self.convs:
-            # Only pass weight dicts if they are provided
+            # Handle argument naming difference
             kwargs = {}
             if edge_weight_dict is not None:
                 if self.architecture == 'gat':
@@ -216,7 +233,6 @@ class BehavioralGNN(torch.nn.Module):
             x_dict = conv(x_dict, edge_index_dict, **kwargs)
             x_dict = {key: F.relu(x) for key, x in x_dict.items()}
         
-        # Apply projection head to Customer nodes
         x_dict['customer'] = self.lin(x_dict['customer'])
         return x_dict
 
@@ -226,6 +242,18 @@ def get_edge_weight_dict(data):
         if 'edge_weight' in data[edge_type]:
             edge_weight_dict[edge_type] = data[edge_type].edge_weight
     return edge_weight_dict if edge_weight_dict else None
+
+def set_seed(seed=42):
+    """Sets the seed for reproducibility."""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to: {seed}")
 
 def train_behavior_gnn(model, data, epochs=10, lr=0.01):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
