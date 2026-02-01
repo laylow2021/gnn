@@ -1,12 +1,23 @@
 import pandas as pd
 import numpy as np
 import torch
+import random
 import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import SAGEConv, GATConv, GraphConv, HeteroConv, Linear
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Tuple, Union
+
+def set_seed(seed=42):
+    """Sets the seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Random seed set to: {seed}")
 
 class BehaviorGraphBuilder:
     """
