@@ -36,13 +36,14 @@ def generate_mock_data():
     
     return pd.concat([df_normal, df_mule]).reset_index(drop=True)
 
-def visualize_suspect(customer_id, data, builder, hops=2, risk_df=None, output_file='ego_graph.png'):
+def visualize_suspect(customer_id, data, builder, hops=2, risk_df=None, max_associates=5, output_file='ego_graph.png'):
     """
     Visualizes the behavioral ego-graph.
     
     Args:
-        risk_df: DataFrame with 'customer_id' and 'is_anomaly' columns.
-                 If provided, only 'Anomaly' neighbors are shown in Hop 2.
+        risk_df: DataFrame with 'cust_idx' (or 'customer_id'), 'is_anomaly', and 'risk_score'.
+        max_associates: Max number of 2nd-hop neighbors to show per behavior node. 
+                        Prevents "hairball" graphs.
     """
     print(f"Visualizing {customer_id}...")
     G = nx.Graph()
@@ -53,6 +54,18 @@ def visualize_suspect(customer_id, data, builder, hops=2, risk_df=None, output_f
 
     cust_idx = builder.cust_map[customer_id]
     
+    # Pre-compute risk lookup if available
+    risk_lookup = {}
+    if risk_df is not None:
+        # Ensure we can map name -> score or idx -> score
+        # The risk_df typically has 'cust_idx' from the pipeline
+        if 'cust_idx' in risk_df.columns:
+            risk_lookup = dict(zip(risk_df['cust_idx'], risk_df['risk_score']))
+        elif 'customer_id' in risk_df.columns:
+            # map name to idx first
+            name_to_score = dict(zip(risk_df['customer_id'], risk_df['risk_score']))
+            risk_lookup = {builder.cust_map[k]: v for k, v in name_to_score.items() if k in builder.cust_map}
+
     # 1. Add Target Customer
     G.add_node(customer_id, color='red', node_type='suspect', size=1000)
     
@@ -82,6 +95,16 @@ def visualize_suspect(customer_id, data, builder, hops=2, risk_df=None, output_f
             # 3. Hop 2: Find others connected to this behavior
             if hops == 2:
                 others = src[dst == b_idx].numpy()
+                
+                # --- SORT & LIMIT ---
+                # Prioritize showing the HIGHEST RISK associates
+                if risk_df is not None:
+                    # Sort by risk score (descending)
+                    others = sorted(others, key=lambda x: risk_lookup.get(x, -999), reverse=True)
+                
+                # Limit count
+                others = others[:max_associates]
+                
                 for o_idx in others:
                     if o_idx == cust_idx: continue
                     
@@ -91,26 +114,62 @@ def visualize_suspect(customer_id, data, builder, hops=2, risk_df=None, output_f
                     
                     # --- FILTER LOGIC ---
                     if risk_df is not None:
-                        # If risk info provided, check if this neighbor is high risk
-                        # Look up
-                        if o_name in risk_df['customer_id'].values:
-                            is_bad = risk_df.loc[risk_df['customer_id'] == o_name, 'is_anomaly'].iloc[0] == -1
-                            if not is_bad:
-                                continue # Skip normal people
-                        else:
-                            # If not in risk df (maybe train/test split?), skip or show grey
-                            continue
+                        # Check if anomaly
+                        score = risk_lookup.get(o_idx, -999)
+                        # We assume risk_df has 'is_anomaly' or we threshold risk_score?
+                        # Let's rely on the previous logic: if passed risk_df, checking is_anomaly column logic 
+                        # is tricky if we converted to dict.
+                        # Simplest: Just use the fact that we sorted by Risk. 
+                        # If the top risk people are not anomalies, then no one is.
+                        # But user explicitly wants to hide non-anomalies.
+                        
+                        # Let's verify 'is_anomaly'
+                        is_bad = False
+                        if 'is_anomaly' in risk_df.columns and 'cust_idx' in risk_df.columns:
+                             # Efficient check?
+                             # Better: Pre-compute set of bad indices
+                             pass
+                        
+                        # Optimization:
+                        # If we sorted by risk, we are already showing the "worst".
+                        # If we want to STRICTLY hide normals:
+                        if score < 0: # decision_function < 0 means anomaly usually (if we used raw output), 
+                                      # BUT my pipeline flipped it! raw_scores = -iso.decision_function
+                                      # So Higher Score = More Anomalous.
+                                      # Threshold depends on contamination.
+                                      # Instead of guessing threshold, let's use the 'is_anomaly' column if present.
+                             pass 
+                             
+                    # Re-implement strict anomaly filter:
+                    if risk_df is not None and 'is_anomaly' in risk_df.columns:
+                         # We need to check if o_idx is in the bad set
+                         # Let's make a set for O(1) lookup
+                         if not hasattr(visualize_suspect, 'bad_indices'):
+                             if 'cust_idx' in risk_df.columns:
+                                 visualize_suspect.bad_indices = set(risk_df[risk_df['is_anomaly'] == -1]['cust_idx'].values)
+                             else:
+                                 # map names
+                                 bad_names = set(risk_df[risk_df['is_anomaly'] == -1]['customer_id'].values)
+                                 visualize_suspect.bad_indices = {builder.cust_map[n] for n in bad_names if n in builder.cust_map}
+                        
+                         if o_idx not in visualize_suspect.bad_indices:
+                             continue
+
                     
-                    # Color logic: Check if it's a Mule (based on name for demo)
+                    # Color logic
                     color = 'orange'
                     G.add_node(o_name, color=color, node_type='associate', size=300)
                     G.add_edge(node_name, o_name)
+
+    # Clean up static attribute if used (hacky but works for script)
+    if hasattr(visualize_suspect, 'bad_indices'):
+        del visualize_suspect.bad_indices
 
     # 4. Plotting
     print(f"Graph constructed. Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
     
     plt.figure(figsize=(12, 10))
-    pos = nx.spring_layout(G, seed=42, k=0.3) # k regulates spacing
+    pos = nx.spring_layout(G, seed=42, k=0.3) 
     
     colors = [nx.get_node_attributes(G, 'color').get(n, 'grey') for n in G.nodes()]
     sizes = [nx.get_node_attributes(G, 'size').get(n, 300) for n in G.nodes()]
@@ -150,8 +209,11 @@ if __name__ == "__main__":
     # Mock Risk DF
     risk_data = pd.DataFrame({
         'customer_id': df['cust_id'].unique(),
-        'is_anomaly': [ -1 if 'Mule' in x else 1 for x in df['cust_id'].unique()]
+        'is_anomaly': [ -1 if 'Mule' in x else 1 for x in df['cust_id'].unique()],
+        'risk_score': np.random.rand(len(df['cust_id'].unique())) # Mock scores
     })
+    # Add cust_idx
+    risk_data['cust_idx'] = risk_data['customer_id'].map(builder.cust_map)
     
     # 3. Visualize Mule_0
-    visualize_suspect("Mule_0", data, builder, hops=2, risk_df=risk_data)
+    visualize_suspect("Mule_0", data, builder, hops=2, risk_df=risk_data, max_associates=3)
