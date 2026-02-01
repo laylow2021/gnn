@@ -248,7 +248,7 @@ def train_behavior_gnn(model, data, epochs=10, lr=0.01):
         
     return model
 
-def detect_behavioral_anomalies(model, data, cust_map):
+def detect_behavioral_anomalies(model, data, cust_map, contamination=0.05):
     model.eval()
     edge_weight_dict = get_edge_weight_dict(data)
     
@@ -256,7 +256,7 @@ def detect_behavioral_anomalies(model, data, cust_map):
         x_dict = model(data.x_dict, data.edge_index_dict, edge_weight_dict)
         emb = x_dict['customer'].cpu().numpy()
         
-    iso = IsolationForest(contamination=0.05, random_state=42)
+    iso = IsolationForest(contamination=contamination, random_state=42)
     scores = -iso.fit_predict(emb)
     raw_scores = -iso.decision_function(emb)
     
