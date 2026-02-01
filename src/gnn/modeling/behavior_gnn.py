@@ -308,3 +308,114 @@ def detect_behavioral_anomalies(model, data, cust_map, contamination=0.05):
     })
     results['customer_id'] = results['cust_idx'].map(inv_map)
     return results
+
+def find_strongly_connected_peers(data, cust_map, min_shared_nodes=2):
+    """
+    Identifies customer pairs connected by shared behavioral nodes.
+    Uses native PyTorch sparse matrix multiplication (A @ A.T) to project
+    the bipartite graph into a Customer-Customer similarity graph.
+    
+    Args:
+        data: HeteroData object.
+        cust_map: Dictionary mapping customer IDs to indices.
+        min_shared_nodes: Minimum number of shared behaviors to qualify as a link.
+    
+    Returns:
+        DataFrame of connected pairs.
+    """
+    num_customers = data['customer'].num_nodes
+    
+    # We will accumulate the adjacency count in a dense tensor or sparse approach
+    # Since N_customers can be large, we iterate per edge type and accumulate indices
+    # However, standard torch.sparse.mm output is dense or sparse depending on config.
+    # For very large N, we might need to stick to processing edge lists manually if memory is tight.
+    # Here we use a robust edge-list approach compatible with native python/torch.
+    
+    edge_types = [et for et in data.edge_types if et[0] == 'customer']
+    
+    # Store all (u, v) pairs where u shares a node with v
+    # This can get huge, so we filter early.
+    
+    # Efficient approach without A@A.T (which explodes memory on CPU):
+    # 1. For each behavior node, find list of connected customers.
+    # 2. Generate pairs from that list.
+    # 3. Count pairs.
+    
+    from collections import defaultdict
+    pair_counts = defaultdict(int)
+    
+    print("Analyzing shared behaviors (Native Mode)...")
+    
+    for et in edge_types:
+        src_type, _, dst_type = et
+        src, dst = data[et].edge_index
+        
+        # Group by destination (Behavior Node)
+        # dst_to_srcs = { behavior_id: [cust_id, cust_id...] }
+        # To do this efficiently with tensors:
+        
+        # Sort by dst to group them
+        sort_idx = torch.argsort(dst)
+        sorted_dst = dst[sort_idx]
+        sorted_src = src[sort_idx]
+        
+        # Iterate unique behaviors
+        unique_b, counts = torch.unique(sorted_dst, return_counts=True)
+        
+        # We only care about behaviors connected to >1 customer (otherwise no pairs)
+        # and < 1000 customers (otherwise it's a supernode/noise)
+        valid_mask = (counts > 1) & (counts < 1000) 
+        valid_b = unique_b[valid_mask]
+        
+        # Pre-calculate start indices
+        # This part requires a bit of logic or looping. 
+        # For simplicity in native python without scatter libraries:
+        
+        # Convert to numpy for fast iteration
+        curr_dst = sorted_dst.numpy()
+        curr_src = sorted_src.numpy()
+        
+        # Find boundaries
+        _, indices = np.unique(curr_dst, return_index=True)
+        # Append end index
+        indices = np.append(indices, len(curr_dst))
+        
+        # Iterate behaviors
+        for i in range(len(indices) - 1):
+            start = indices[i]
+            end = indices[i+1]
+            if end - start < 2 or end - start > 100: # Filter supernodes
+                continue
+                
+            customers_in_bucket = curr_src[start:end]
+            
+            # Generate pairs (Combinations)
+            # Since size is small (filtered above), double loop is fine
+            for idx_i in range(len(customers_in_bucket)):
+                for idx_j in range(idx_i + 1, len(customers_in_bucket)):
+                    u = customers_in_bucket[idx_i]
+                    v = customers_in_bucket[idx_j]
+                    
+                    # Store as tuple (min, max) to ignore direction
+                    if u < v:
+                        pair_counts[(u, v)] += 1
+                    else:
+                        pair_counts[(v, u)] += 1
+
+    # Format results
+    inv_map = {v: k for k, v in cust_map.items()}
+    results = []
+    
+    for (u, v), count in pair_counts.items():
+        if count >= min_shared_nodes:
+            results.append({
+                'Customer_A': inv_map.get(u, u),
+                'Customer_B': inv_map.get(v, v),
+                'Shared_Behaviors': count
+            })
+            
+    df_res = pd.DataFrame(results)
+    if not df_res.empty:
+        df_res = df_res.sort_values('Shared_Behaviors', ascending=False)
+        
+    return df_res
