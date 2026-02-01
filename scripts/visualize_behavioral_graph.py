@@ -36,7 +36,14 @@ def generate_mock_data():
     
     return pd.concat([df_normal, df_mule]).reset_index(drop=True)
 
-def visualize_suspect(customer_id, data, builder, hops=2, output_file='ego_graph.png'):
+def visualize_suspect(customer_id, data, builder, hops=2, risk_df=None, output_file='ego_graph.png'):
+    """
+    Visualizes the behavioral ego-graph.
+    
+    Args:
+        risk_df: DataFrame with 'customer_id' and 'is_anomaly' columns.
+                 If provided, only 'Anomaly' neighbors are shown in Hop 2.
+    """
     print(f"Visualizing {customer_id}...")
     G = nx.Graph()
     
@@ -82,9 +89,20 @@ def visualize_suspect(customer_id, data, builder, hops=2, output_file='ego_graph
                     inv_cust = {v: k for k, v in builder.cust_map.items()}
                     o_name = inv_cust.get(o_idx, str(o_idx))
                     
-                    # Color logic: Check if it's a Mule (based on name for demo)
-                    color = 'orange' if 'Mule' in o_name else 'lightgrey'
+                    # --- FILTER LOGIC ---
+                    if risk_df is not None:
+                        # If risk info provided, check if this neighbor is high risk
+                        # Look up
+                        if o_name in risk_df['customer_id'].values:
+                            is_bad = risk_df.loc[risk_df['customer_id'] == o_name, 'is_anomaly'].iloc[0] == -1
+                            if not is_bad:
+                                continue # Skip normal people
+                        else:
+                            # If not in risk df (maybe train/test split?), skip or show grey
+                            continue
                     
+                    # Color logic: Check if it's a Mule (based on name for demo)
+                    color = 'orange'
                     G.add_node(o_name, color=color, node_type='associate', size=300)
                     G.add_edge(node_name, o_name)
 
@@ -102,14 +120,13 @@ def visualize_suspect(customer_id, data, builder, hops=2, output_file='ego_graph
     # Legend
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', label='Suspect', markersize=10),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='skyblue', label='Behavior (Date/Amt)', markersize=10),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', label='Co-Conspirator (Mule)', markersize=10),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='lightgrey', label='Other Users', markersize=10)
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', label='Target Suspect', markersize=10),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='skyblue', label='Shared Behavior', markersize=10),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', label='High Risk Associate', markersize=10)
     ]
     plt.legend(handles=legend_elements, loc='upper right')
     
-    plt.title(f"Behavioral Network of {customer_id}")
+    plt.title(f"High-Risk Behavioral Network of {customer_id}")
     plt.savefig(output_file)
     print(f"Plot saved to {output_file}")
 
@@ -130,5 +147,11 @@ if __name__ == "__main__":
     builder = BehaviorGraphBuilder(config)
     data = builder.build(df)
     
+    # Mock Risk DF
+    risk_data = pd.DataFrame({
+        'customer_id': df['cust_id'].unique(),
+        'is_anomaly': [ -1 if 'Mule' in x else 1 for x in df['cust_id'].unique()]
+    })
+    
     # 3. Visualize Mule_0
-    visualize_suspect("Mule_0", data, builder, hops=2)
+    visualize_suspect("Mule_0", data, builder, hops=2, risk_df=risk_data)
