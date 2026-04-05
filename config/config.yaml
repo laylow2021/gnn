@@ -34,6 +34,7 @@ data:
   anomaly_ratio: 0.01
   column_mapping:
     customer_id: "customer_id"
+    transaction_id: "transaction_id"
     amount: "amount"
     date: "date"
     direction: "direction"

@@ -113,7 +113,7 @@ class GraphBuilder:
 
     def _match_one_to_one(self, df: pd.DataFrame) -> pd.DataFrame:
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
-        date_col = self.mapping['date']; tx_id_col = 'transaction_id'; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
+        date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']
         
@@ -129,7 +129,7 @@ class GraphBuilder:
     def _match_many_to_one(self, df: pd.DataFrame) -> pd.DataFrame:
         """Finds multiple OUTs (mules) summing to one large IN (hub) using optimized symmetry search."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
-        date_col = self.mapping['date']; tx_id_col = 'transaction_id'; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
+        date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']
         max_depth = self.config['graph'].get('max_mule_depth', 4); min_tx = self.config['graph'].get('min_transaction_amount', 1)
@@ -164,7 +164,7 @@ class GraphBuilder:
     def _match_one_to_many(self, df: pd.DataFrame) -> pd.DataFrame:
         """Finds one large OUT (hub) distributed into multiple smaller INs (mules)."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
-        date_col = self.mapping['date']; tx_id_col = 'transaction_id'; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
+        date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']; max_depth = self.config['graph'].get('max_mule_depth', 4)
 
