@@ -7,6 +7,7 @@ import seaborn as sns
 from typing import Dict, Any, List, Optional
 import numpy as np
 import os
+import shap
 
 class AnomalyInterpreter:
     def __init__(self, model: torch.nn.Module, config: Dict[str, Any]):
@@ -37,14 +38,38 @@ class AnomalyInterpreter:
         plt.show()
         return importance_df
 
-    def local_node_explanation(self, node_id: int, x: torch.Tensor, x_recon: torch.Tensor):
-        node_error = (x[node_id] - x_recon[node_id])**2
+    def explain_node_with_shap(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor, 
+                               target_node_idx: int = None, n_samples: int = 100):
+        """Calculate SHAP values for node features relative to reconstruction error."""
+        self.model.eval()
+        
+        # Define a wrapper that calculates MSE for a given input x
+        def model_mse_wrapper(x_np):
+            x_torch = torch.from_numpy(x_np).float().to(x.device)
+            with torch.no_grad():
+                _, x_recon, _ = self.model(x_torch, edge_index, edge_attr)
+                mse = torch.mean((x_torch - x_recon)**2, dim=1)
+            return mse.cpu().numpy()
+
+        # Background data for SHAP (e.g., subset of nodes)
+        bg_idx = np.random.choice(len(x), min(len(x), 50), replace=False)
+        explainer = shap.KernelExplainer(model_mse_wrapper, x.cpu().numpy()[bg_idx])
+        
+        # If target_node_idx is provided, explain that specific node, else explain a sample
+        if target_node_idx is not None:
+            test_x = x.cpu().numpy()[target_node_idx:target_node_idx+1]
+        else:
+            test_x = x.cpu().numpy()[np.random.choice(len(x), 10, replace=False)]
+            
+        shap_values = explainer.shap_values(test_x, n_jobs=1)
+        
         feat_names = self.config['graph']['node_features']
-        plt.figure(figsize=(8, 4))
-        plt.barh(feat_names, node_error.detach().cpu().numpy(), color='salmon')
-        plt.xlabel("Reconstruction Error (MSE)")
-        plt.title(f"Local Feature Importance for Node {node_id}")
+        plt.figure(figsize=(10, 6))
+        shap.summary_plot(shap_values, test_x, feature_names=feat_names, show=False)
+        plt.title("SHAP Feature Importance (Contribution to Reconstruction Error)")
         plt.show()
+        
+        return shap_values
 
     def explain_edge_anomalies(self, edge_attr: torch.Tensor, edge_attr_recon: torch.Tensor):
         per_feat_error = (edge_attr - edge_attr_recon)**2
@@ -56,49 +81,62 @@ class AnomalyInterpreter:
         plt.show()
 
     def local_perspective(self, node_id: int, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
-                          num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None):
-        """Enhanced neighborhood view with hops and original ID labels."""
+                          num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None,
+                          min_edge_risk_quantile: float = 0.0):
+        """Enhanced neighborhood view with hops, original ID labels, and risk-based edge filtering."""
         self.model.eval()
         subset, edge_index_sub, mapping, edge_mask = k_hop_subgraph(
             node_id, num_hops, data.edge_index, relabel_nodes=False
         )
+        
+        # Calculate edge risk threshold
+        edge_threshold_val = torch.quantile(edge_mse, min_edge_risk_quantile).item()
+        
         G = nx.Graph()
-
+        
         # Determine labels: Use original IDs if inv_map is provided
         labels = {}
         for n_idx in subset.tolist():
             orig_id = inv_map.get(n_idx, n_idx) if inv_map else n_idx
             G.add_node(n_idx, mse=node_mse[n_idx].item(), orig_id=orig_id)
             labels[n_idx] = orig_id
-
+            
         sub_edges = data.edge_index[:, edge_mask].cpu().numpy()
         sub_edge_mse = edge_mse[edge_mask].cpu().numpy()
+        
+        # Add edges ONLY if they exceed the risk quantile
         for i in range(sub_edges.shape[1]):
-            u, v = sub_edges[:, i]
-            G.add_edge(u, v, mse=sub_edge_mse[i])
+            if sub_edge_mse[i] >= edge_threshold_val:
+                u, v = sub_edges[:, i]
+                G.add_edge(u, v, mse=sub_edge_mse[i])
+            
+        # Remove isolated nodes that might have resulted from edge filtering (except the target node)
+        nodes_to_remove = [n for n in G.nodes() if G.degree(n) == 0 and n != node_id]
+        G.remove_nodes_from(nodes_to_remove)
 
         node_threshold = torch.quantile(node_mse, 0.95).item()
-        edge_threshold = torch.quantile(edge_mse, 0.95).item()
-
+        edge_high_risk_threshold = torch.quantile(edge_mse, 0.95).item()
+        
         plt.figure(figsize=(12, 10))
         pos = nx.spring_layout(G, seed=42)
-
+        
         node_colors = []
         for n in G.nodes():
             if n == node_id: node_colors.append('red')
             elif G.nodes[n]['mse'] >= node_threshold: node_colors.append('orange')
             else: node_colors.append('skyblue')
-
+            
         edge_colors = []
         for u, v in G.edges():
-            if G.edges[u, v]['mse'] >= edge_threshold: edge_colors.append('orange')
+            if G.edges[u, v]['mse'] >= edge_high_risk_threshold: edge_colors.append('red')
             else: edge_colors.append('gray')
-
-        nx.draw(G, pos, labels=labels, with_labels=True, node_color=node_colors, edge_color=edge_colors, 
-                node_size=800, alpha=0.8, width=2)
-
+            
+        nx.draw(G, pos, labels={n: labels[n] for n in G.nodes()}, with_labels=True, node_color=node_colors, 
+                edge_color=edge_colors, node_size=800, alpha=0.8, width=2)
+        
         target_label = labels.get(node_id, node_id)
-        plt.title(f"{num_hops}-Hop Neighborhood for Customer: {target_label}\n(Red: Target, Amber: High Risk)")
+        plt.title(f"{num_hops}-Hop Neighborhood for Customer: {target_label}\n"
+                  f"(Filtered to Edges > {min_edge_risk_quantile*100:.0f}th percentile risk)")
         plt.show()
 
     def global_perspective(self, edge_mse: torch.Tensor):
@@ -132,9 +170,6 @@ class AnomalyInterpreter:
         edge_df['edge_anomaly_score'] = edge_mse.cpu().numpy()
         edge_df['source_node_score'] = node_mse[edge_df['source'].values].cpu().numpy()
         edge_df['target_node_score'] = node_mse[edge_df['target'].values].cpu().numpy()
-
-        # Original IDs should already be in collapsed_edges_df as source_id/target_id
-        # from the updated GraphBuilder, but we ensure columns are clean.
 
         # Convert list metadata to strings
         audit_cols = ['out_tx_ids', 'out_amounts', 'out_dates', 'in_tx_ids', 'in_amounts', 'in_dates']
