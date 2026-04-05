@@ -105,6 +105,36 @@ class AnomalyInterpreter:
                   f"(Filtered to Edges > {min_edge_risk_quantile*100:.0f}th percentile risk)")
         plt.show()
 
+    def get_subgraph_data(self, node_id: int, data: Any, num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None):
+        """
+        Extract a localized subgraph including tensors and human-readable DataFrames.
+        """
+        subset, edge_index_sub, mapping, edge_mask = k_hop_subgraph(
+            node_id, num_hops, data.edge_index, relabel_nodes=True
+        )
+        
+        # 1. Tensors
+        sub_x = data.x[subset]
+        sub_edge_attr = data.edge_attr[edge_mask]
+        
+        # 2. Human-Readable Node DF
+        node_features = self.config['graph']['node_features']
+        sub_nodes_df = pd.DataFrame(sub_x.cpu().numpy(), columns=node_features)
+        sub_nodes_df['node_idx'] = subset.cpu().numpy()
+        if inv_map:
+            sub_nodes_df['customer_id'] = sub_nodes_df['node_idx'].map(inv_map)
+            
+        # 3. Human-Readable Edge DF (with audit trail)
+        sub_edges_df = data.collapsed_edges_df.iloc[edge_mask.cpu().numpy()].copy()
+        
+        return {
+            'x': sub_x,
+            'edge_index': edge_index_sub,
+            'edge_attr': sub_edge_attr,
+            'nodes_df': sub_nodes_df,
+            'edges_df': sub_edges_df
+        }
+
     def global_perspective(self, edge_mse: torch.Tensor):
         plt.figure(figsize=(10, 6))
         sns.histplot(edge_mse.detach().cpu().numpy(), bins=50, kde=True, color='purple')
