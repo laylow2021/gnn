@@ -11,22 +11,34 @@ An enterprise-grade, modular GNN pipeline for detecting money laundering (AML) a
 - **GATv2 Autoencoder:** Uses Graph Attention Networks to learn structural and feature-based normal behavior.
 - **Out-of-Time (OOT) Validation:** Built-in support for training on historical periods and testing on future data with persistent scalers and models.
 - **Deep Explainability:** Global and Local feature importance for both node and edge anomalies, decomposing reconstruction error into actionable insights.
-
 ## 📂 Project Structure
 ```text
 ├── config/
-│   └── config.yaml          # Hyperparameters & Column Mappings
-├── artifacts/
-│   └── model_v1/            # Saved Model, Scaler, and Config
-├── notebooks/
-│   └── main_pipeline.ipynb  # End-to-End OOT Training & Inference
+│   └── config.yaml          # Hyperparameters, Column Mappings, and Model Config
 ├── src/
 │   ├── data/
-│   │   └── generator.py     # AML Typology Simulation (Pass-Through, Fan-In)
+│   │   ├── generator.py     # Simulation (Pass-Through, Fan-In)
+│   │   └── processor.py     # CLEANING & AGGREGATION (Inject your EDA here)
+│   ├── features/
+│   │   └── classical.py     # SEGMENTATION & SCORING (Clustering, IForest)
 │   ├── graph/
 │   │   └── builder.py       # Heuristic Matching & Edge Collapsing
 │   ├── models/
-│   │   └── gnn.py           # GATv2 Autoencoder & Combined MSE Loss
+│   │   └── gnn.py           # GATv2 Autoencoder (GPU/CPU support)
+│   ├── explain/
+│   │   └── interpreter.py   # Global/Local XAI & Excel Export
+│   └── pipeline.py          # UNIFIED ORCHESTRATOR (End-to-End Control)
+├── notebooks/
+│   └── main_pipeline.ipynb  # End-to-End Orchestrated Execution
+```
+
+## 🛠️ Unified Pipeline
+The project now uses a **Layered Pipeline** approach for enhanced detection:
+1.  **Preprocessing Layer**: Uniform cleaning and aggregation logic applied across training and inference.
+2.  **Classical ML Layer**: Segments the population via clustering and assigns local anomaly scores using Isolation Forest.
+3.  **Graph Layer**: Incorporates classical scores as node features, allowing the GNN to learn structural relationships between suspicious individuals.
+4.  **Explainability Layer**: Decomposes total risk into feature contribution and network neighborhood context.
+
 │   ├── explain/
 │   │   └── interpreter.py   # Global/Local Feature Importance & Visualization
 │   └── utils/
