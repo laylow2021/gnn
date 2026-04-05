@@ -112,8 +112,9 @@ class AnomalyInterpreter:
         plt.show()
 
     def save_anomalies_to_excel(self, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
-                               tx_df: pd.DataFrame, output_path: str, inv_map: Optional[Dict[int, Any]] = None):
-        """Export ranked anomalies with original IDs and audit trails."""
+                               tx_df: pd.DataFrame, output_path: str, inv_map: Optional[Dict[int, Any]] = None,
+                               top_n_percent: float = 0.05):
+        """Export ranked anomalies with original IDs and audit trails. top_n_percent controls raw TX context."""
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         c_id_col = self.config['data']['column_mapping']['customer_id']
 
@@ -150,9 +151,10 @@ class AnomalyInterpreter:
             node_df.to_excel(writer, sheet_name='Node Anomalies', index=False)
             edge_df.to_excel(writer, sheet_name='Edge Anomalies', index=False)
 
-            # Map top customers back for context
-            top_ids = node_df.head(20)['customer_id'].tolist()
+            # Map top customers back for context based on percentage
+            num_top = max(1, int(len(node_df) * top_n_percent))
+            top_ids = node_df.head(num_top)['customer_id'].tolist()
             raw_context = tx_df[tx_df[c_id_col].isin(top_ids)]
             raw_context.to_excel(writer, sheet_name='Top Node Raw TX', index=False)
 
-        print(f"Anomalies exported to {output_path}")
+        print(f"Anomalies ({num_top} nodes for context) exported to {output_path}")
