@@ -7,7 +7,6 @@ import seaborn as sns
 from typing import Dict, Any, List, Optional
 import numpy as np
 import os
-import shap
 
 class AnomalyInterpreter:
     def __init__(self, model: torch.nn.Module, config: Dict[str, Any]):
@@ -37,56 +36,6 @@ class AnomalyInterpreter:
         plt.title("Global Node Feature Importance (Error Contribution)")
         plt.show()
         return importance_df
-
-    def explain_node_with_shap(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor, 
-                               target_node_idx: int = None):
-        """Calculate SHAP values for node features relative to reconstruction error."""
-        self.model.eval()
-        
-        # Identity Wrapper: SHAP perturbs features, but GNN needs full matrix size for edge_index consistency
-        # We perturb only the target node (or a sample of nodes)
-        def model_mse_wrapper(x_subset_np):
-            # x_subset_np will have shape (num_samples, num_features)
-            # We need to return (num_samples,) MSE values
-            results = []
-            for i in range(x_subset_np.shape[0]):
-                # Create a full matrix and replace ONLY the target node's features
-                x_full = x.clone()
-                x_full[target_node_idx] = torch.from_numpy(x_subset_np[i]).float().to(x.device)
-                
-                with torch.no_grad():
-                    _, x_recon, _ = self.model(x_full, edge_index, edge_attr)
-                    # We only care about the error of the specific target node we explained
-                    mse = torch.mean((x_full[target_node_idx] - x_recon[target_node_idx])**2)
-                results.append(mse.item())
-            return np.array(results)
-
-        if target_node_idx is None:
-            # Default to explaining the highest error node if none provided
-            with torch.no_grad():
-                _, x_recon, _ = self.model(x, edge_index, edge_attr)
-                target_node_idx = int(torch.argmax(torch.mean((x - x_recon)**2, dim=1)))
-
-        # Background: Use the actual node features as background
-        # Sampling a small background for speed
-        bg_data = x.cpu().numpy()[np.random.choice(len(x), min(len(x), 20), replace=False)]
-        explainer = shap.KernelExplainer(model_mse_wrapper, bg_data)
-        
-        # Test data: Exactly ONE node's features to ensure shape consistency
-        test_x = x.cpu().numpy()[target_node_idx:target_node_idx+1]
-        
-        print(f"Calculating SHAP for Node {target_node_idx} (inv_id if available mapping provided in visuals)...")
-        shap_values = explainer.shap_values(test_x, n_jobs=1)
-        
-        feat_names = self.config['graph']['node_features']
-        plt.figure(figsize=(10, 6))
-        # Ensure we are passing only the SHAP values for this one node
-        # For KernelExplainer on single output, shap_values is (1, num_feats)
-        shap.summary_plot(shap_values, test_x, feature_names=feat_names, show=False)
-        plt.title(f"SHAP Importance for Node {target_node_idx}")
-        plt.show()
-        
-        return shap_values
 
     def explain_edge_anomalies(self, edge_attr: torch.Tensor, edge_attr_recon: torch.Tensor):
         per_feat_error = (edge_attr - edge_attr_recon)**2

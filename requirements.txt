@@ -9,5 +9,4 @@ seaborn
 networkx
 openpyxl
 joblib
-shap
 pytest

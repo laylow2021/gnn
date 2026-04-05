@@ -8,6 +8,7 @@ data:
     direction: direction
     direction_in: IN
     direction_out: OUT
+    transaction_id: transaction_id
   num_customers: 100
   num_days: 10
 graph:
@@ -22,11 +23,11 @@ graph:
   matching_strategy: many_to_one
   max_mule_depth: 4
   min_edge_flow_ratio: 0.1
+  min_edge_frequency: 2
+  min_scarcity_threshold: 0.05
   min_transaction_amount: 50
   node_features:
-  - directional_ratio
-  - funding_deficit
-  - temporal_z_score
+  - vol_log
   time_window_days: 2
 model:
   device: auto
