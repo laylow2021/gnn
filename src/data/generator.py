@@ -32,9 +32,32 @@ def generate_transactions(
     # Inject AML Typologies
     tx_df = _inject_pass_through(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
     tx_df = _inject_repeated_layering(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
+    tx_df = _inject_daily_self_passthrough(tx_df, int(num_customers * anomaly_ratio * 0.1), date_range, num_customers)
     tx_df = _inject_fan_in(tx_df, int(num_customers * anomaly_ratio * 0.4), date_range, num_customers)
     
     return tx_df.sort_values('date').reset_index(drop=True)
+
+def _inject_daily_self_passthrough(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
+    """Inject same-day self-loop passthroughs for consecutive days."""
+    new_rows = []
+    base_id = df['transaction_id'].max() + 1
+    
+    for _ in range(num_typologies):
+        customer_id = np.random.randint(0, num_customers)
+        amount = np.round(np.random.uniform(2000, 8000), 2)
+        # Create same-day IN/OUT for 3-5 consecutive days
+        num_days = np.random.randint(3, 6)
+        start_day_idx = np.random.randint(0, len(date_range) - num_days)
+        
+        for d in range(num_days):
+            current_date = date_range[start_day_idx + d]
+            # 1. IN
+            new_rows.append({'transaction_id': base_id, 'customer_id': customer_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'IN'})
+            # 2. OUT (Same Day)
+            new_rows.append({'transaction_id': base_id + 1, 'customer_id': customer_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'OUT'})
+            base_id += 2
+            
+    return pd.concat([df, pd.DataFrame(new_rows)])
 
 def _inject_repeated_layering(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
     """Inject recurring 1:1 matches between the same pair (High Frequency edge)."""
