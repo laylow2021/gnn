@@ -7,13 +7,12 @@ from typing import Dict, Any, Optional, List
 from itertools import combinations
 
 class GraphBuilder:
-    def __init__(self, config: Dict[str, Any], scaler: Optional[StandardScaler] = None):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.mapping = config['data']['column_mapping']
-        self.scaler = scaler if scaler is not None else StandardScaler()
 
-    def build_graph(self, tx_df: pd.DataFrame, fit_scaler: bool = True) -> Data:
-        """Construct a homogeneous PyG graph with refined virtual edge features."""
+    def build_graph(self, tx_df: pd.DataFrame) -> Data:
+        """Construct a homogeneous PyG graph with raw node/edge features (unscaled)."""
         # 1. Min Transaction Amount Filter
         amt_col = self.mapping['amount']
         min_tx_amt = self.config['graph'].get('min_transaction_amount', 0)
@@ -41,13 +40,13 @@ class GraphBuilder:
         edge_attr_cols = self.config['graph']['edge_features']
         edge_attr = torch.tensor(collapsed_edges[edge_attr_cols].values, dtype=torch.float)
         
-        if fit_scaler:
-            x_scaled = self.scaler.fit_transform(node_features_df)
-        else:
-            x_scaled = self.scaler.transform(node_features_df)
-            
-        x = torch.tensor(x_scaled, dtype=torch.float)
+        # Final Node Features Construction
+        x = torch.tensor(node_features_df.values, dtype=torch.float)
         
+        # Explicitly check for NaNs/Infs and fail if found (as per mandate)
+        if torch.isnan(x).any() or torch.isnan(edge_attr).any():
+            raise ValueError("Graph features contain NaNs. Imputation must be handled during preprocessing.")
+
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
         data.collapsed_edges_df = collapsed_edges
         
@@ -74,6 +73,7 @@ class GraphBuilder:
         in_val = self.mapping['direction_in']
         out_val = self.mapping['direction_out']
         
+        # Behavioral Aggregates
         agg = df.groupby([c_id, dir_col])[amt_col].agg(['sum', 'count']).unstack(fill_value=0)
         sum_in = agg.get(('sum', in_val), pd.Series(0.0, index=agg.index))
         sum_out = agg.get(('sum', out_val), pd.Series(0.0, index=agg.index))
@@ -85,7 +85,15 @@ class GraphBuilder:
         daily_counts = df.groupby([c_id, df[date_col].dt.date]).size().unstack(fill_value=0)
         features['temporal_z_score'] = (daily_counts.mean(axis=1) - daily_counts.mean().mean()) / (daily_counts.std().mean() + 1e-9)
         
-        all_customers = pd.DataFrame(index=range(df[c_id].max() + 1))
+        # Extra Node Columns from Data
+        extra_cols = self.config['graph'].get('extra_node_columns', [])
+        if extra_cols:
+            extra_agg = df.groupby(c_id)[extra_cols].mean()
+            features = features.join(extra_agg, how='outer')
+
+        # Reindex to cover all customers and fill with 0 to ensure continuous indices
+        max_cust = df[c_id].max()
+        all_customers = pd.DataFrame(index=range(max_cust + 1))
         return all_customers.join(features).fillna(0)
 
     def _match_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
