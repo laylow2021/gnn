@@ -254,7 +254,7 @@ class GraphBuilder:
         
         return {
             'source': out_row[c_id], 'target': in_row[c_id], 'inferred_amount': amt,
-            'time_delta': (in_row[date_col] - out_row[date_col]).total_seconds() / 3600,
+            'time_delta': (in_row[date_col] - out_row[date_col]).total_seconds() / 86400.0,
             'scarcity_score': scarcity, 'out_tx_id': out_row[tx_id_col],
             'out_date': out_row[date_col], 'out_amount_raw': out_row[amt_col],
             'in_tx_id': in_row[tx_id_col], 'in_date': in_row[date_col], 'in_amount_raw': in_row[amt_col]
