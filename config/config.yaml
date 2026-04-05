@@ -1,14 +1,14 @@
 # AML Graph Autoencoder Configuration
 
 graph:
-  matching_strategy: "many_to_one" # Options: exact_1_to_1, many_to_one
-  time_window_days: 3 # Increased to capture 2-day delays
+  matching_strategy: "hybrid" # Options: exact_1_to_1, many_to_one, one_to_many, hybrid
+  time_window_days: 3 # Increased to capture temporal lags
   amount_tolerance_pct: 0.01
   max_mule_depth: 4
-  min_transaction_amount: 50
-  min_edge_flow_ratio: 0.01 # Relaxed from 0.1
-  min_edge_frequency: 1 # Minimum matching transactions per edge
-  min_scarcity_threshold: 0.01 # Relaxed from 0.05
+  min_transaction_amount: 50 # Capture smaller mule movements
+  min_edge_flow_ratio: 0.01 # Keep low-volume connections
+  min_edge_frequency: 1 # Allow one-time hops (Pass-throughs)
+  min_scarcity_threshold: 0.01 # Keep all common amounts
   node_features: []
  # List all columns from input data to aggregate (mean) as node features
   edge_features:
