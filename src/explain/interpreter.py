@@ -38,8 +38,9 @@ class AnomalyInterpreter:
         importance_df = pd.DataFrame({'Feature': feat_names, 'Importance (Mean MSE)': mean_error_per_feat})
         importance_df = importance_df.sort_values('Importance (Mean MSE)', ascending=False)
         plt.figure(figsize=(10, 6))
-        sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='viridis', legend=False)
+        sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='viridis')
         plt.title("Global Node Feature Importance (Error Contribution)")
+        plt.legend().remove() if plt.gca().get_legend() else None
         plt.show()
         return importance_df
 
@@ -48,8 +49,9 @@ class AnomalyInterpreter:
         mean_error = per_feat_error.mean(dim=0).detach().cpu().numpy()
         feat_names = self.config['graph']['edge_features']
         plt.figure(figsize=(10, 6))
-        sns.barplot(x=mean_error, y=feat_names, hue=feat_names, palette='magma', legend=False)
+        sns.barplot(x=mean_error, y=feat_names, hue=feat_names, palette='magma')
         plt.title("Global Edge Feature Importance (Error Contribution)")
+        plt.legend().remove() if plt.gca().get_legend() else None
         plt.show()
 
     def local_perspective(self, node_id: int, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
