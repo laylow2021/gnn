@@ -15,7 +15,6 @@ graph:
     - "min_time_delta"
     - "outflow_ratio"
     - "inflow_ratio"
-  extra_node_columns: [] # List columns in input data to aggregate (mean) as node features
 
 model:
   device: "auto" # Options: auto, cuda, cpu
