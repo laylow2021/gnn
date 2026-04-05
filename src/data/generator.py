@@ -36,20 +36,26 @@ def generate_transactions(
     return tx_df.sort_values('date').reset_index(drop=True)
 
 def _inject_pass_through(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
-    """Inject 1:1 matching IN/OUT within 1-2 days."""
+    """Inject 1:1 matching OUT/IN within 1-2 days (Money flow: Source -> Target)."""
     new_rows = []
     base_id = df['transaction_id'].max() + 1
     
     for _ in range(num_typologies):
-        customer_id = np.random.randint(0, num_customers)
+        # We need TWO different customers to form an actual edge
+        source_id = np.random.randint(0, num_customers)
+        target_id = np.random.randint(0, num_customers)
+        while target_id == source_id:
+            target_id = np.random.randint(0, num_customers)
+            
         start_date = np.random.choice(date_range[:-2])
         amount = np.round(np.random.uniform(1000, 5000), 2)
         
-        # IN transaction
-        new_rows.append({'transaction_id': base_id, 'customer_id': customer_id, 'date': pd.to_datetime(start_date), 'amount': amount, 'direction': 'IN'})
-        # OUT transaction 1-2 days later
+        # 1. OUT transaction (Money leaves Source)
+        new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(start_date), 'amount': amount, 'direction': 'OUT'})
+        
+        # 2. IN transaction (Money enters Target 1-2 days later)
         next_date = start_date + datetime.timedelta(days=np.random.randint(1, 3))
-        new_rows.append({'transaction_id': base_id + 1, 'customer_id': customer_id, 'date': pd.to_datetime(next_date), 'amount': amount, 'direction': 'OUT'})
+        new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(next_date), 'amount': amount, 'direction': 'IN'})
         base_id += 2
         
     return pd.concat([df, pd.DataFrame(new_rows)])
