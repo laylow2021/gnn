@@ -7,7 +7,10 @@ graph:
   max_mule_depth: 4
   min_transaction_amount: 50
   min_edge_flow_ratio: 0.1
-  node_features: [] # List all columns from input data to aggregate (mean) as node features
+  min_edge_frequency: 2 # Only keep edges with at least 2 matching transactions
+  min_scarcity_threshold: 0.05 # Filter out very common transaction amounts
+  node_features: []
+ # List all columns from input data to aggregate (mean) as node features
   edge_features:
     - "log_total_amount"
     - "edge_frequency"

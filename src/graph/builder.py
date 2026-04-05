@@ -48,10 +48,23 @@ class GraphBuilder:
         collapsed_edges = collapsed_edges[(collapsed_edges['inflow_ratio'] >= min_ratio) | 
                                           (collapsed_edges['outflow_ratio'] >= min_ratio)].copy()
 
-        # Create edge_index using the integer-mapped columns
-        edge_index = torch.tensor(collapsed_edges[['source', 'target']].values.T, dtype=torch.long)
-        edge_attr_cols = self.config['graph']['edge_features']
-        edge_attr = torch.tensor(collapsed_edges[edge_attr_cols].values, dtype=torch.float)
+        # 3. Frequency & Scarcity Filters (Noise Reduction)
+        min_freq = self.config['graph'].get('min_edge_frequency', 1)
+        min_scarcity = self.config['graph'].get('min_scarcity_threshold', 0.0)
+        
+        collapsed_edges = collapsed_edges[
+            (collapsed_edges['edge_frequency'] >= min_freq) & 
+            (collapsed_edges['mean_scarcity'] >= min_scarcity)
+        ].copy()
+
+        if collapsed_edges.empty:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attr = torch.empty((0, len(self.config['graph']['edge_features'])), dtype=torch.float)
+        else:
+            # Create edge_index using the integer-mapped columns
+            edge_index = torch.tensor(collapsed_edges[['source', 'target']].values.T, dtype=torch.long)
+            edge_attr_cols = self.config['graph']['edge_features']
+            edge_attr = torch.tensor(collapsed_edges[edge_attr_cols].values, dtype=torch.float)
         
         # Final Node Features Construction
         x = torch.tensor(node_features_df.values, dtype=torch.float)
