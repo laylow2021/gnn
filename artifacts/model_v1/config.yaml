@@ -1,0 +1,35 @@
+data:
+  anomaly_ratio: 0.01
+  avg_tx_per_day: 5
+  column_mapping:
+    amount: amount
+    customer_id: customer_id
+    date: date
+    direction: direction
+    direction_in: IN
+    direction_out: OUT
+  num_customers: 100
+  num_days: 10
+graph:
+  amount_tolerance_pct: 0.01
+  edge_features:
+  - log_total_amount
+  - edge_frequency
+  - mean_scarcity
+  - min_time_delta
+  matching_strategy: many_to_one
+  max_mule_depth: 4
+  node_features:
+  - directional_ratio
+  - funding_deficit
+  - temporal_z_score
+  time_window_days: 2
+model:
+  dropout: 0.1
+  edge_loss_weight: 0.3
+  hidden_channels: 64
+  learning_rate: 0.001
+  node_loss_weight: 0.7
+  num_layers: 3
+  out_channels: 32
+  weight_decay: 1e-5
