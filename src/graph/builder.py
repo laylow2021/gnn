@@ -16,6 +16,10 @@ class GraphBuilder:
     def build_graph(self, tx_df: pd.DataFrame) -> Data:
         """Construct a homogeneous PyG graph with raw node/edge features (unscaled)."""
         c_id = self.mapping['customer_id']
+        amt_col = self.mapping['amount']
+        
+        # 0. Global Amount Frequency for Scarcity calculation
+        self.amt_counts = tx_df[amt_col].value_counts().to_dict()
         
         # 0. ID Mapping (Support for strings/non-contiguous IDs)
         unique_ids = sorted(tx_df[c_id].unique())
@@ -246,7 +250,11 @@ class GraphBuilder:
                     break 
         return pd.DataFrame(matches)
 
-    def _create_match_dict(self, out_row, in_row, amt, scarcity, c_id, date_col, tx_id_col, amt_col):
+    def _create_match_dict(self, out_row, in_row, amt, scarcity_multiplier, c_id, date_col, tx_id_col, amt_col):
+        # Base Scarcity: 1 / frequency of this amount in the global ledger
+        base_scarcity = 1.0 / (self.amt_counts.get(out_row[amt_col], 1) + 1e-9)
+        scarcity = base_scarcity * scarcity_multiplier
+        
         return {
             'source': out_row[c_id], 'target': in_row[c_id], 'inferred_amount': amt,
             'time_delta': (in_row[date_col] - out_row[date_col]).total_seconds() / 3600,
