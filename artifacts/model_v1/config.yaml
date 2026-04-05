@@ -17,14 +17,19 @@ graph:
   - edge_frequency
   - mean_scarcity
   - min_time_delta
+  - outflow_ratio
+  - inflow_ratio
   matching_strategy: many_to_one
   max_mule_depth: 4
+  min_edge_flow_ratio: 0.1
+  min_transaction_amount: 50
   node_features:
   - directional_ratio
   - funding_deficit
   - temporal_z_score
   time_window_days: 2
 model:
+  device: auto
   dropout: 0.1
   edge_loss_weight: 0.3
   hidden_channels: 64
