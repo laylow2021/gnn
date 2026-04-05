@@ -2,12 +2,12 @@
 
 graph:
   matching_strategy: "many_to_one" # Options: exact_1_to_1, many_to_one
-  time_window_days: 2
+  time_window_days: 1
   amount_tolerance_pct: 0.01
   max_mule_depth: 4
   min_transaction_amount: 50
   min_edge_flow_ratio: 0.1
-  min_edge_frequency: 2 # Only keep edges with at least 2 matching transactions
+  min_edge_frequency: 1 # Minimum matching transactions per edge
   min_scarcity_threshold: 0.05 # Filter out very common transaction amounts
   node_features: []
  # List all columns from input data to aggregate (mean) as node features
