@@ -30,10 +30,41 @@ def generate_transactions(
     })
     
     # Inject AML Typologies
-    tx_df = _inject_pass_through(tx_df, int(num_customers * anomaly_ratio * 0.4), date_range, num_customers)
+    tx_df = _inject_pass_through(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
+    tx_df = _inject_repeated_layering(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
     tx_df = _inject_fan_in(tx_df, int(num_customers * anomaly_ratio * 0.4), date_range, num_customers)
     
     return tx_df.sort_values('date').reset_index(drop=True)
+
+def _inject_repeated_layering(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
+    """Inject recurring 1:1 matches between the same pair (High Frequency edge)."""
+    new_rows = []
+    base_id = df['transaction_id'].max() + 1
+    
+    for _ in range(num_typologies):
+        source_id = np.random.randint(0, num_customers)
+        target_id = np.random.randint(0, num_customers)
+        while target_id == source_id:
+            target_id = np.random.randint(0, num_customers)
+            
+        amount = np.round(np.random.uniform(1000, 5000), 2)
+        # Create 3-5 repeated transactions over time
+        num_repeats = np.random.randint(3, 6)
+        
+        for i in range(num_repeats):
+            # Ensure dates are chronological and spread out
+            day_idx = i * 5 # One hop every 5 days
+            if day_idx >= len(date_range) - 2: break
+            
+            start_date = date_range[day_idx]
+            # OUT
+            new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(start_date), 'amount': amount, 'direction': 'OUT'})
+            # IN 1 day later
+            next_date = start_date + datetime.timedelta(days=1)
+            new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(next_date), 'amount': amount, 'direction': 'IN'})
+            base_id += 2
+            
+    return pd.concat([df, pd.DataFrame(new_rows)])
 
 def _inject_pass_through(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
     """Inject 1:1 matching OUT/IN within 1-2 days (Money flow: Source -> Target)."""
