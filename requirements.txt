@@ -4,10 +4,10 @@ pandas
 numpy
 scikit-learn
 matplotlib
-pytest
 PyYAML
 seaborn
 networkx
 openpyxl
 joblib
 shap
+pytest
