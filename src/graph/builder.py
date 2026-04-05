@@ -114,32 +114,37 @@ class GraphBuilder:
 
     def _match_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
         strategy = self.config['graph'].get('matching_strategy', 'exact_1_to_1')
+        used_tx_ids = set()
+        
         if strategy == 'many_to_one':
-            return self._match_many_to_one(df)
+            return self._match_many_to_one(df, used_tx_ids)
         elif strategy == 'one_to_many':
-            return self._match_one_to_many(df)
+            return self._match_one_to_many(df, used_tx_ids)
         elif strategy == 'hybrid':
-            m1 = self._match_many_to_one(df)
-            m2 = self._match_one_to_many(df)
-            return pd.concat([m1, m2]).drop_duplicates(subset=['out_tx_id', 'in_tx_id'])
-        return self._match_one_to_one(df)
+            m1 = self._match_many_to_one(df, used_tx_ids)
+            m2 = self._match_one_to_many(df, used_tx_ids)
+            return pd.concat([m1, m2])
+        return self._match_one_to_one(df, used_tx_ids)
 
-    def _match_one_to_one(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _match_one_to_one(self, df: pd.DataFrame, used_tx_ids: set) -> pd.DataFrame:
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']
         
         for _, in_row in in_tx.iterrows():
+            if in_row[tx_id_col] in used_tx_ids: continue
             mask = ((out_tx[date_col] < in_row[date_col]) & (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)) &
-                    (out_tx[amt_col] >= in_row[amt_col] * (1 - tol)) & (out_tx[amt_col] <= in_row[amt_col] * (1 + tol)))
+                    (out_tx[amt_col] >= in_row[amt_col] * (1 - tol)) & (out_tx[amt_col] <= in_row[amt_col] * (1 + tol)) &
+                    (~out_tx[tx_id_col].isin(used_tx_ids)))
             potential_outs = out_tx[mask]
-            scarcity = 1.0 / (len(potential_outs) + 1e-9)
-            for _, out_row in potential_outs.iterrows():
-                matches.append(self._create_match_dict(out_row, in_row, min(out_row[amt_col], in_row[amt_col]), scarcity, c_id, date_col, tx_id_col, amt_col))
+            if not potential_outs.empty:
+                out_row = potential_outs.sort_values(date_col, ascending=False).iloc[0]
+                matches.append(self._create_match_dict(out_row, in_row, min(out_row[amt_col], in_row[amt_col]), 1.0, c_id, date_col, tx_id_col, amt_col))
+                used_tx_ids.add(in_row[tx_id_col]); used_tx_ids.add(out_row[tx_id_col])
         return pd.DataFrame(matches)
 
-    def _match_many_to_one(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _match_many_to_one(self, df: pd.DataFrame, used_tx_ids: set) -> pd.DataFrame:
         """Finds multiple OUTs (mules) summing to one large IN (hub) using optimized symmetry search."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
@@ -148,19 +153,23 @@ class GraphBuilder:
         max_depth = self.config['graph'].get('max_mule_depth', 4); min_tx = self.config['graph'].get('min_transaction_amount', 1)
 
         for _, in_row in in_tx.iterrows():
+            if in_row[tx_id_col] in used_tx_ids: continue
             target_amt = float(in_row[amt_col])
-            potential_mask = ((out_tx[date_col] < in_row[date_col]) & (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)))
+            potential_mask = ((out_tx[date_col] < in_row[date_col]) & 
+                              (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)) &
+                              (~out_tx[tx_id_col].isin(used_tx_ids)))
             candidates = out_tx[potential_mask]
             if candidates.empty: continue
             
             # 1:1 Match check first
             one_to_one = candidates[(candidates[amt_col] >= target_amt*(1-tol)) & (candidates[amt_col] <= target_amt*(1+tol))]
             if not one_to_one.empty:
-                for _, out_row in one_to_one.iterrows():
-                    matches.append(self._create_match_dict(out_row, in_row, min(out_row[amt_col], target_amt), 1.0/len(one_to_one), c_id, date_col, tx_id_col, amt_col))
+                out_row = one_to_one.sort_values(date_col, ascending=False).iloc[0]
+                matches.append(self._create_match_dict(out_row, in_row, min(out_row[amt_col], target_amt), 1.0, c_id, date_col, tx_id_col, amt_col))
+                used_tx_ids.add(in_row[tx_id_col]); used_tx_ids.add(out_row[tx_id_col])
                 continue
 
-            # Optimized Many-to-One: Look for 'n' equal-ish parts
+            # Optimized Many-to-One
             max_n = min(int(target_amt // min_tx), max_depth)
             for n in range(2, max_n + 1):
                 part_amt = target_amt / n
@@ -168,39 +177,52 @@ class GraphBuilder:
                 parts = candidates[part_mask]
                 
                 if len(parts) >= n:
-                    # Take the 'n' closest in time or just first 'n'
-                    for _, out_row in parts.head(n).iterrows():
+                    selected_parts = parts.head(n)
+                    for _, out_row in selected_parts.iterrows():
                         matches.append(self._create_match_dict(out_row, in_row, out_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
-                    break # Found a valid structured split
+                        used_tx_ids.add(out_row[tx_id_col])
+                    used_tx_ids.add(in_row[tx_id_col])
+                    break 
         return pd.DataFrame(matches)
 
-    def _match_one_to_many(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Finds one large OUT (hub) distributed into multiple smaller INs (mules)."""
+    def _match_one_to_many(self, df: pd.DataFrame, used_tx_ids: set) -> pd.DataFrame:
+        """Finds one large OUT (hub) distributed into multiple smaller INs (mules) with strict uniqueness."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
-        matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']; max_depth = self.config['graph'].get('max_mule_depth', 4)
+        matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']; max_depth = self.config['graph'].get('max_mule_depth', 4); min_tx = self.config['graph'].get('min_transaction_amount', 1)
 
         for _, out_row in out_tx.iterrows():
+            if out_row[tx_id_col] in used_tx_ids: continue
             source_amt = float(out_row[amt_col])
-            potential_mask = ((in_tx[date_col] > out_row[date_col]) & (in_tx[date_col] <= out_row[date_col] + pd.Timedelta(days=window)) & (in_tx[amt_col] < source_amt * (1 + tol)))
-            candidates = in_tx[potential_mask].sort_values(amt_col, ascending=False).head(20)
+            potential_mask = ((in_tx[date_col] > out_row[date_col]) & 
+                              (in_tx[date_col] <= out_row[date_col] + pd.Timedelta(days=window)) & 
+                              (~in_tx[tx_id_col].isin(used_tx_ids)))
+            candidates = in_tx[potential_mask]
+            if candidates.empty: continue
 
+            # 1:1 Check first
             one_to_one = candidates[(candidates[amt_col] >= source_amt*(1-tol)) & (candidates[amt_col] <= source_amt*(1+tol))]
             if not one_to_one.empty:
-                for _, in_row in one_to_one.iterrows():
-                    matches.append(self._create_match_dict(out_row, in_row, min(source_amt, in_row[amt_col]), 1.0/len(one_to_one), c_id, date_col, tx_id_col, amt_col))
+                in_row = one_to_one.sort_values(date_col, ascending=True).iloc[0]
+                matches.append(self._create_match_dict(out_row, in_row, min(source_amt, in_row[amt_col]), 1.0, c_id, date_col, tx_id_col, amt_col))
+                used_tx_ids.add(out_row[tx_id_col]); used_tx_ids.add(in_row[tx_id_col])
                 continue
 
-            for r in range(2, max_depth + 1):
-                found = False
-                for combo in combinations(candidates.index, r):
-                    subset = candidates.loc[list(combo)]
-                    if source_amt*(1-tol) <= subset[amt_col].sum() <= source_amt*(1+tol):
-                        for _, in_row in subset.iterrows():
-                            matches.append(self._create_match_dict(out_row, in_row, in_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
-                        found = True; break
-                if found: break
+            # Optimized One-to-Many
+            max_n = min(int(source_amt // min_tx), max_depth)
+            for n in range(2, max_n + 1):
+                part_amt = source_amt / n
+                part_mask = (candidates[amt_col] >= part_amt*(1-tol)) & (candidates[amt_col] <= part_amt*(1+tol))
+                parts = candidates[part_mask]
+
+                if len(parts) >= n:
+                    selected_parts = parts.head(n)
+                    for _, in_row in selected_parts.iterrows():
+                        matches.append(self._create_match_dict(out_row, in_row, in_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
+                        used_tx_ids.add(in_row[tx_id_col])
+                    used_tx_ids.add(out_row[tx_id_col])
+                    break 
         return pd.DataFrame(matches)
 
     def _create_match_dict(self, out_row, in_row, amt, scarcity, c_id, date_col, tx_id_col, amt_col):
