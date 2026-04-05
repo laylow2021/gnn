@@ -151,55 +151,59 @@ class AnomalyInterpreter:
 
     def save_anomalies_to_excel(self, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
                                tx_df: pd.DataFrame, output_path: str, inv_map: Optional[Dict[int, Any]] = None,
-                               top_n_percent: float = 0.05):
-        """Export ranked anomalies with original IDs and audit trails. top_n_percent controls raw TX context."""
+                               node_top_percent: float = 0.05, edge_top_percent: float = 0.05):
+        """
+        Export filtered ranked anomalies to Excel and return full DataFrames.
+        node_top_percent/edge_top_percent define what is written to Excel.
+        """
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         c_id_col = self.config['data']['column_mapping']['customer_id']
 
-        # 1. Node Anomalies
+        # 1. Prepare Full Node Anomalies DF
         node_features = self.config['graph'].get('node_features', [])
         x_np = data.x.cpu().numpy()
-        
-        # Handle fallback feature names if config is empty or mismatched
         if not node_features or len(node_features) != x_np.shape[1]:
             node_features = [f"feat_{i}" for i in range(x_np.shape[1])]
             if len(node_features) == 1: node_features = ['tx_count']
 
-        node_df = pd.DataFrame(x_np, columns=node_features)
-        node_df['node_idx'] = range(len(node_df))
-
-        # Map back to original IDs
+        node_df_full = pd.DataFrame(x_np, columns=node_features)
+        node_df_full['node_idx'] = range(len(node_df_full))
         if inv_map:
-            node_df['customer_id'] = node_df['node_idx'].map(inv_map)
+            node_df_full['customer_id'] = node_df_full['node_idx'].map(inv_map)
         else:
-            node_df['customer_id'] = node_df['node_idx']
+            node_df_full['customer_id'] = node_df_full['node_idx']
+        node_df_full['anomaly_score'] = node_mse.cpu().numpy()
+        node_df_full = node_df_full.sort_values('anomaly_score', ascending=False)
 
-        node_df['anomaly_score'] = node_mse.cpu().numpy()
-        node_df = node_df.sort_values('anomaly_score', ascending=False)
+        # 2. Prepare Full Edge Anomalies DF
+        edge_df_full = data.collapsed_edges_df.copy()
+        edge_df_full['edge_anomaly_score'] = edge_mse.cpu().numpy()
+        edge_df_full['source_node_score'] = node_mse[edge_df_full['source'].values].cpu().numpy()
+        edge_df_full['target_node_score'] = node_mse[edge_df_full['target'].values].cpu().numpy()
+        edge_df_full = edge_df_full.sort_values('edge_anomaly_score', ascending=False)
 
-        # 2. Edge Anomalies
-        edge_df = data.collapsed_edges_df.copy()
-        edge_df['edge_anomaly_score'] = edge_mse.cpu().numpy()
-        edge_df['source_node_score'] = node_mse[edge_df['source'].values].cpu().numpy()
-        edge_df['target_node_score'] = node_mse[edge_df['target'].values].cpu().numpy()
+        # 3. Filter for Excel Export
+        num_top_nodes = max(1, int(len(node_df_full) * node_top_percent))
+        num_top_edges = max(1, int(len(edge_df_full) * edge_top_percent))
+        
+        node_df_excel = node_df_full.head(num_top_nodes)
+        edge_df_excel = edge_df_full.head(num_top_edges).copy()
 
-        # Convert list metadata to strings
+        # Convert list metadata to strings for Excel readability
         audit_cols = ['out_tx_ids', 'out_amounts', 'out_dates', 'in_tx_ids', 'in_amounts', 'in_dates']
         for col in audit_cols:
-            if col in edge_df.columns:
-                edge_df[col] = edge_df[col].apply(lambda x: str(x))
+            if col in edge_df_excel.columns:
+                edge_df_excel[col] = edge_df_excel[col].apply(lambda x: str(x))
 
-        edge_df = edge_df.sort_values('edge_anomaly_score', ascending=False)
-
-        # 3. Write to Excel
+        # 4. Write to Excel
         with pd.ExcelWriter(output_path) as writer:
-            node_df.to_excel(writer, sheet_name='Node Anomalies', index=False)
-            edge_df.to_excel(writer, sheet_name='Edge Anomalies', index=False)
+            node_df_excel.to_excel(writer, sheet_name='Top Node Anomalies', index=False)
+            edge_df_excel.to_excel(writer, sheet_name='Top Edge Anomalies', index=False)
 
-            # Map top customers back for context based on percentage
-            num_top = max(1, int(len(node_df) * top_n_percent))
-            top_ids = node_df.head(num_top)['customer_id'].tolist()
-            raw_context = tx_df[tx_df[c_id_col].isin(top_ids)]
+            # Transaction details for Top Node Anomalies
+            top_node_ids = node_df_excel['customer_id'].tolist()
+            raw_context = tx_df[tx_df[c_id_col].isin(top_node_ids)]
             raw_context.to_excel(writer, sheet_name='Top Node Raw TX', index=False)
 
-        print(f"Anomalies ({num_top} nodes for context) exported to {output_path}")
+        print(f"Exported top {node_top_percent*100:.1f}% nodes and {edge_top_percent*100:.1f}% edges to {output_path}")
+        return node_df_full, edge_df_full
