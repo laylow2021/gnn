@@ -10,25 +10,37 @@ class GraphBuilder:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.mapping = config['data']['column_mapping']
+        self.customer_map = {} # Maps original ID to 0..N-1
+        self.inv_customer_map = {}
 
     def build_graph(self, tx_df: pd.DataFrame) -> Data:
         """Construct a homogeneous PyG graph with raw node/edge features (unscaled)."""
+        c_id = self.mapping['customer_id']
+        
+        # 0. ID Mapping (Support for strings/non-contiguous IDs)
+        unique_ids = sorted(tx_df[c_id].unique())
+        self.customer_map = {original: i for i, original in enumerate(unique_ids)}
+        self.inv_customer_map = {i: original for original, i in self.customer_map.items()}
+        
+        # Apply mapping to a copy for graph construction
+        df = tx_df.copy()
+        df[c_id] = df[c_id].map(self.customer_map)
+
         # 1. Min Transaction Amount Filter
         amt_col = self.mapping['amount']
         min_tx_amt = self.config['graph'].get('min_transaction_amount', 0)
-        tx_df = tx_df[tx_df[amt_col] >= min_tx_amt].copy()
+        df = df[df[amt_col] >= min_tx_amt].copy()
 
-        # Pre-process dates: Handle YYYYMMDD integers or strings by converting to datetime
+        # Pre-process dates
         date_col = self.mapping['date']
-        if not pd.api.types.is_datetime64_any_dtype(tx_df[date_col]):
-            # Attempt conversion assuming YYYYMMDD format (as int or string)
-            tx_df[date_col] = pd.to_datetime(tx_df[date_col].astype(str), format='%Y%m%d', errors='coerce')
+        if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df[date_col] = pd.to_datetime(df[date_col].astype(str), format='%Y%m%d', errors='coerce')
         
         # Calculate totals per customer for ratio denominators
-        customer_totals = self._calculate_customer_totals(tx_df)
+        customer_totals = self._calculate_customer_totals(df)
         
-        node_features_df = self._calculate_node_features(tx_df)
-        edges_df = self._match_transactions(tx_df)
+        node_features_df = self._calculate_node_features(df)
+        edges_df = self._match_transactions(df)
         collapsed_edges = self._collapse_edges(edges_df, customer_totals)
         
         # 2. Min Edge Flow Ratio Filter
@@ -36,6 +48,7 @@ class GraphBuilder:
         collapsed_edges = collapsed_edges[(collapsed_edges['inflow_ratio'] >= min_ratio) | 
                                           (collapsed_edges['outflow_ratio'] >= min_ratio)].copy()
 
+        # Create edge_index using the integer-mapped columns
         edge_index = torch.tensor(collapsed_edges[['source', 'target']].values.T, dtype=torch.long)
         edge_attr_cols = self.config['graph']['edge_features']
         edge_attr = torch.tensor(collapsed_edges[edge_attr_cols].values, dtype=torch.float)
@@ -43,11 +56,15 @@ class GraphBuilder:
         # Final Node Features Construction
         x = torch.tensor(node_features_df.values, dtype=torch.float)
         
-        # Explicitly check for NaNs/Infs and fail if found (as per mandate)
+        # Explicitly check for NaNs/Infs and fail if found
         if torch.isnan(x).any() or torch.isnan(edge_attr).any():
             raise ValueError("Graph features contain NaNs. Imputation must be handled during preprocessing.")
 
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        
+        # Add original IDs back to collapsed_edges for audit trails
+        collapsed_edges['source_id'] = collapsed_edges['source'].map(self.inv_customer_map)
+        collapsed_edges['target_id'] = collapsed_edges['target'].map(self.inv_customer_map)
         data.collapsed_edges_df = collapsed_edges
         
         return data
