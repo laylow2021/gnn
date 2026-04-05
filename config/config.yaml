@@ -39,6 +39,7 @@ data:
     customer_id: "customer_id"
     transaction_id: "transaction_id"
     amount: "amount"
+    amount_scarcity: "your_actual_scarcity_column" # Change this to your column name
     date: "date"
     direction: "direction"
     direction_in: "IN"
