@@ -26,7 +26,8 @@ def generate_transactions(
         'customer_id': customer_ids,
         'date': pd.to_datetime(dates),
         'amount': np.round(amounts, 2),
-        'direction': directions
+        'direction': directions,
+        'label': 0  # 0: Normal
     })
     
     # Inject AML Typologies
@@ -38,7 +39,7 @@ def generate_transactions(
     return tx_df.sort_values('date').reset_index(drop=True)
 
 def _inject_daily_self_passthrough(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
-    """Inject same-day self-loop passthroughs for consecutive days."""
+    """Inject same-day self-loop passthroughs for consecutive days. Label: 4"""
     new_rows = []
     base_id = df['transaction_id'].max() + 1
     
@@ -52,15 +53,15 @@ def _inject_daily_self_passthrough(df: pd.DataFrame, num_typologies: int, date_r
         for d in range(num_days):
             current_date = date_range[start_day_idx + d]
             # 1. IN
-            new_rows.append({'transaction_id': base_id, 'customer_id': customer_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'IN'})
+            new_rows.append({'transaction_id': base_id, 'customer_id': customer_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'IN', 'label': 4})
             # 2. OUT (Same Day)
-            new_rows.append({'transaction_id': base_id + 1, 'customer_id': customer_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'OUT'})
+            new_rows.append({'transaction_id': base_id + 1, 'customer_id': customer_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'OUT', 'label': 4})
             base_id += 2
             
     return pd.concat([df, pd.DataFrame(new_rows)])
 
 def _inject_repeated_layering(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
-    """Inject recurring 1:1 matches between the same pair (High Frequency edge)."""
+    """Inject recurring 1:1 matches between the same pair. Label: 3"""
     new_rows = []
     base_id = df['transaction_id'].max() + 1
     
@@ -71,31 +72,26 @@ def _inject_repeated_layering(df: pd.DataFrame, num_typologies: int, date_range:
             target_id = np.random.randint(0, num_customers)
             
         amount = np.round(np.random.uniform(1000, 5000), 2)
-        # Create 3-5 repeated transactions over time
         num_repeats = np.random.randint(3, 6)
         
         for i in range(num_repeats):
-            # Ensure dates are chronological and spread out
-            day_idx = i * 5 # One hop every 5 days
+            day_idx = i * 5
             if day_idx >= len(date_range) - 2: break
             
             start_date = date_range[day_idx]
-            # OUT
-            new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(start_date), 'amount': amount, 'direction': 'OUT'})
-            # IN 1 day later
+            new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(start_date), 'amount': amount, 'direction': 'OUT', 'label': 3})
             next_date = start_date + datetime.timedelta(days=1)
-            new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(next_date), 'amount': amount, 'direction': 'IN'})
+            new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(next_date), 'amount': amount, 'direction': 'IN', 'label': 3})
             base_id += 2
             
     return pd.concat([df, pd.DataFrame(new_rows)])
 
 def _inject_pass_through(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
-    """Inject 1:1 matching OUT/IN within 1-2 days (Money flow: Source -> Target)."""
+    """Inject 1:1 matching OUT/IN within 1-2 days. Label: 1"""
     new_rows = []
     base_id = df['transaction_id'].max() + 1
     
     for _ in range(num_typologies):
-        # We need TWO different customers to form an actual edge
         source_id = np.random.randint(0, num_customers)
         target_id = np.random.randint(0, num_customers)
         while target_id == source_id:
@@ -104,18 +100,15 @@ def _inject_pass_through(df: pd.DataFrame, num_typologies: int, date_range: List
         start_date = np.random.choice(date_range[:-2])
         amount = np.round(np.random.uniform(1000, 5000), 2)
         
-        # 1. OUT transaction (Money leaves Source)
-        new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(start_date), 'amount': amount, 'direction': 'OUT'})
-        
-        # 2. IN transaction (Money enters Target 1-2 days later)
+        new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(start_date), 'amount': amount, 'direction': 'OUT', 'label': 1})
         next_date = start_date + datetime.timedelta(days=np.random.randint(1, 3))
-        new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(next_date), 'amount': amount, 'direction': 'IN'})
+        new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(next_date), 'amount': amount, 'direction': 'IN', 'label': 1})
         base_id += 2
         
     return pd.concat([df, pd.DataFrame(new_rows)])
 
 def _inject_fan_in(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
-    """Inject Many-to-One (Fan-In): 3-5 mules withdraw small amounts (OUT), 1 Hub deposits (IN) the aggregate total."""
+    """Inject Many-to-One (Fan-In). Label: 2"""
     new_rows = []
     base_id = df['transaction_id'].max() + 1
     
@@ -130,12 +123,10 @@ def _inject_fan_in(df: pd.DataFrame, num_typologies: int, date_range: List[datet
             mule_date = hub_date - datetime.timedelta(days=np.random.randint(1, 3))
             amount = np.round(np.random.uniform(100, 500), 2)
             total_amount += amount
-            # Mules withdraw (OUT) to send money
-            new_rows.append({'transaction_id': base_id, 'customer_id': m_id, 'date': pd.to_datetime(mule_date), 'amount': amount, 'direction': 'OUT'})
+            new_rows.append({'transaction_id': base_id, 'customer_id': m_id, 'date': pd.to_datetime(mule_date), 'amount': amount, 'direction': 'OUT', 'label': 2})
             base_id += 1
             
-        # Hub receives the deposit (IN)
-        new_rows.append({'transaction_id': base_id, 'customer_id': hub_id, 'date': pd.to_datetime(hub_date), 'amount': np.round(total_amount, 2), 'direction': 'IN'})
+        new_rows.append({'transaction_id': base_id, 'customer_id': hub_id, 'date': pd.to_datetime(hub_date), 'amount': np.round(total_amount, 2), 'direction': 'IN', 'label': 2})
         base_id += 1
         
     return pd.concat([df, pd.DataFrame(new_rows)])
