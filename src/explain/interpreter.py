@@ -55,36 +55,50 @@ class AnomalyInterpreter:
         plt.title("Global Edge Feature Importance (Error Contribution)")
         plt.show()
 
-    def local_perspective(self, node_id: int, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, num_hops: int = 1):
-        """Enhanced neighborhood view with hops and color-coding."""
+    def local_perspective(self, node_id: int, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
+                          num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None):
+        """Enhanced neighborhood view with hops and original ID labels."""
         self.model.eval()
         subset, edge_index_sub, mapping, edge_mask = k_hop_subgraph(
             node_id, num_hops, data.edge_index, relabel_nodes=False
         )
         G = nx.Graph()
+
+        # Determine labels: Use original IDs if inv_map is provided
+        labels = {}
         for n_idx in subset.tolist():
-            G.add_node(n_idx, mse=node_mse[n_idx].item())
+            orig_id = inv_map.get(n_idx, n_idx) if inv_map else n_idx
+            G.add_node(n_idx, mse=node_mse[n_idx].item(), orig_id=orig_id)
+            labels[n_idx] = orig_id
+
         sub_edges = data.edge_index[:, edge_mask].cpu().numpy()
         sub_edge_mse = edge_mse[edge_mask].cpu().numpy()
         for i in range(sub_edges.shape[1]):
             u, v = sub_edges[:, i]
             G.add_edge(u, v, mse=sub_edge_mse[i])
+
         node_threshold = torch.quantile(node_mse, 0.95).item()
         edge_threshold = torch.quantile(edge_mse, 0.95).item()
+
         plt.figure(figsize=(12, 10))
         pos = nx.spring_layout(G, seed=42)
+
         node_colors = []
         for n in G.nodes():
             if n == node_id: node_colors.append('red')
             elif G.nodes[n]['mse'] >= node_threshold: node_colors.append('orange')
             else: node_colors.append('skyblue')
+
         edge_colors = []
         for u, v in G.edges():
             if G.edges[u, v]['mse'] >= edge_threshold: edge_colors.append('orange')
             else: edge_colors.append('gray')
-        nx.draw(G, pos, with_labels=True, node_color=node_colors, edge_color=edge_colors, 
+
+        nx.draw(G, pos, labels=labels, with_labels=True, node_color=node_colors, edge_color=edge_colors, 
                 node_size=800, alpha=0.8, width=2)
-        plt.title(f"{num_hops}-Hop Neighborhood for Node {node_id}\n(Red: Target, Amber: High Risk)")
+
+        target_label = labels.get(node_id, node_id)
+        plt.title(f"{num_hops}-Hop Neighborhood for Customer: {target_label}\n(Red: Target, Amber: High Risk)")
         plt.show()
 
     def global_perspective(self, edge_mse: torch.Tensor):
@@ -94,39 +108,50 @@ class AnomalyInterpreter:
         plt.show()
 
     def save_anomalies_to_excel(self, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
-                               tx_df: pd.DataFrame, output_path: str):
-        """Export ranked anomalies with transaction audit trails."""
+                               tx_df: pd.DataFrame, output_path: str, inv_map: Optional[Dict[int, Any]] = None):
+        """Export ranked anomalies with original IDs and audit trails."""
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         c_id_col = self.config['data']['column_mapping']['customer_id']
-        
+
         # 1. Node Anomalies
         node_features = self.config['graph']['node_features']
         node_df = pd.DataFrame(data.x.cpu().numpy(), columns=node_features)
-        node_df['customer_id'] = range(len(node_df))
+        node_df['node_idx'] = range(len(node_df))
+
+        # Map back to original IDs
+        if inv_map:
+            node_df['customer_id'] = node_df['node_idx'].map(inv_map)
+        else:
+            node_df['customer_id'] = node_df['node_idx']
+
         node_df['anomaly_score'] = node_mse.cpu().numpy()
         node_df = node_df.sort_values('anomaly_score', ascending=False)
-        
-        # 2. Edge Anomalies with Audit Trail
-        # Retrieve the metadata-rich dataframe stored in the Data object
+
+        # 2. Edge Anomalies
         edge_df = data.collapsed_edges_df.copy()
         edge_df['edge_anomaly_score'] = edge_mse.cpu().numpy()
         edge_df['source_node_score'] = node_mse[edge_df['source'].values].cpu().numpy()
         edge_df['target_node_score'] = node_mse[edge_df['target'].values].cpu().numpy()
-        
-        # Convert list metadata to strings for Excel readability
+
+        # Original IDs should already be in collapsed_edges_df as source_id/target_id
+        # from the updated GraphBuilder, but we ensure columns are clean.
+
+        # Convert list metadata to strings
         audit_cols = ['out_tx_ids', 'out_amounts', 'out_dates', 'in_tx_ids', 'in_amounts', 'in_dates']
         for col in audit_cols:
             if col in edge_df.columns:
                 edge_df[col] = edge_df[col].apply(lambda x: str(x))
-        
+
         edge_df = edge_df.sort_values('edge_anomaly_score', ascending=False)
 
         # 3. Write to Excel
         with pd.ExcelWriter(output_path) as writer:
             node_df.to_excel(writer, sheet_name='Node Anomalies', index=False)
             edge_df.to_excel(writer, sheet_name='Edge Anomalies', index=False)
-            top_customers = node_df.head(20)['customer_id'].tolist()
-            raw_context = tx_df[tx_df[c_id_col].isin(top_customers)]
+
+            # Map top customers back for context
+            top_ids = node_df.head(20)['customer_id'].tolist()
+            raw_context = tx_df[tx_df[c_id_col].isin(top_ids)]
             raw_context.to_excel(writer, sheet_name='Top Node Raw TX', index=False)
 
         print(f"Anomalies exported to {output_path}")
