@@ -28,7 +28,13 @@ class AnomalyInterpreter:
     def explain_node_anomalies(self, x: torch.Tensor, x_recon: torch.Tensor):
         per_feature_error = (x - x_recon)**2
         mean_error_per_feat = per_feature_error.mean(dim=0).detach().cpu().numpy()
-        feat_names = self.config['graph']['node_features']
+        
+        # Robust feature name handling
+        feat_names = self.config['graph'].get('node_features', [])
+        if not feat_names or len(feat_names) != len(mean_error_per_feat):
+            feat_names = [f"feat_{i}" for i in range(len(mean_error_per_feat))]
+            if len(feat_names) == 1: feat_names = ['tx_count'] # Match GraphBuilder fallback
+            
         importance_df = pd.DataFrame({'Feature': feat_names, 'Importance (Mean MSE)': mean_error_per_feat})
         importance_df = importance_df.sort_values('Importance (Mean MSE)', ascending=False)
         plt.figure(figsize=(10, 6))
@@ -149,8 +155,15 @@ class AnomalyInterpreter:
         c_id_col = self.config['data']['column_mapping']['customer_id']
 
         # 1. Node Anomalies
-        node_features = self.config['graph']['node_features']
-        node_df = pd.DataFrame(data.x.cpu().numpy(), columns=node_features)
+        node_features = self.config['graph'].get('node_features', [])
+        x_np = data.x.cpu().numpy()
+        
+        # Handle fallback feature names if config is empty or mismatched
+        if not node_features or len(node_features) != x_np.shape[1]:
+            node_features = [f"feat_{i}" for i in range(x_np.shape[1])]
+            if len(node_features) == 1: node_features = ['tx_count']
+
+        node_df = pd.DataFrame(x_np, columns=node_features)
         node_df['node_idx'] = range(len(node_df))
 
         # Map back to original IDs
