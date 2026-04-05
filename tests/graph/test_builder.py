@@ -14,6 +14,7 @@ def config():
         'data': {
             'column_mapping': {
                 'customer_id': 'cust_id',
+                'transaction_id': 'transaction_id',
                 'amount': 'amt',
                 'date': 'dt',
                 'direction': 'dir',
