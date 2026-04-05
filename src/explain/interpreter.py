@@ -72,15 +72,16 @@ class AnomalyInterpreter:
         bg_data = x.cpu().numpy()[np.random.choice(len(x), min(len(x), 20), replace=False)]
         explainer = shap.KernelExplainer(model_mse_wrapper, bg_data)
         
-        # Test data: The specific node's features
+        # Test data: Exactly ONE node's features to ensure shape consistency
         test_x = x.cpu().numpy()[target_node_idx:target_node_idx+1]
         
-        print(f"Calculating SHAP for Node {target_node_idx}...")
+        print(f"Calculating SHAP for Node {target_node_idx} (inv_id if available mapping provided in visuals)...")
         shap_values = explainer.shap_values(test_x, n_jobs=1)
         
         feat_names = self.config['graph']['node_features']
         plt.figure(figsize=(10, 6))
-        # shap_values is a list for multi-output, but here it's (1, 1, num_feats)
+        # Ensure we are passing only the SHAP values for this one node
+        # For KernelExplainer on single output, shap_values is (1, num_feats)
         shap.summary_plot(shap_values, test_x, feature_names=feat_names, show=False)
         plt.title(f"SHAP Importance for Node {target_node_idx}")
         plt.show()
