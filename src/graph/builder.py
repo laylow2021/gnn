@@ -67,29 +67,15 @@ class GraphBuilder:
 
     def _calculate_node_features(self, df: pd.DataFrame) -> pd.DataFrame:
         c_id = self.mapping['customer_id']
-        dir_col = self.mapping['direction']
-        amt_col = self.mapping['amount']
-        date_col = self.mapping['date']
-        in_val = self.mapping['direction_in']
-        out_val = self.mapping['direction_out']
+        node_feats = self.config['graph'].get('node_features', [])
         
-        # Behavioral Aggregates
-        agg = df.groupby([c_id, dir_col])[amt_col].agg(['sum', 'count']).unstack(fill_value=0)
-        sum_in = agg.get(('sum', in_val), pd.Series(0.0, index=agg.index))
-        sum_out = agg.get(('sum', out_val), pd.Series(0.0, index=agg.index))
-        
-        features = pd.DataFrame(index=agg.index)
-        features['directional_ratio'] = sum_in / (sum_in + sum_out + 1e-9)
-        features['funding_deficit'] = sum_out - sum_in
-        
-        daily_counts = df.groupby([c_id, df[date_col].dt.date]).size().unstack(fill_value=0)
-        features['temporal_z_score'] = (daily_counts.mean(axis=1) - daily_counts.mean().mean()) / (daily_counts.std().mean() + 1e-9)
-        
-        # Extra Node Columns from Data
-        extra_cols = self.config['graph'].get('extra_node_columns', [])
-        if extra_cols:
-            extra_agg = df.groupby(c_id)[extra_cols].mean()
-            features = features.join(extra_agg, how='outer')
+        if not node_feats:
+            # If no features defined, return a default identity or count if possible, 
+            # but usually, node_features should be defined.
+            features = df.groupby(c_id).size().to_frame('tx_count')
+        else:
+            # Aggregate all configured columns from the input data (mean by default)
+            features = df.groupby(c_id)[node_feats].mean()
 
         # Reindex to cover all customers and fill with 0 to ensure continuous indices
         max_cust = df[c_id].max()

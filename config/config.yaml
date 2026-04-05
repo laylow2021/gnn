@@ -7,10 +7,7 @@ graph:
   max_mule_depth: 4
   min_transaction_amount: 50
   min_edge_flow_ratio: 0.1
-  node_features: 
-    - "directional_ratio"
-    - "funding_deficit"
-    - "temporal_z_score"
+  node_features: [] # List all columns from input data to aggregate (mean) as node features
   edge_features:
     - "log_total_amount"
     - "edge_frequency"
