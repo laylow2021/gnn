@@ -136,8 +136,8 @@ class GraphBuilder:
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']
         
         for _, in_row in in_tx.iterrows():
-            # Find candidate OUTs where this (IN_TX, OUT_Cust) hasn't been used
-            mask = ((out_tx[date_col] < in_row[date_col]) & (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)) &
+            # Find candidate OUTs where this (IN_TX, OUT_Cust) hasn't been used (Inclusive temporal check)
+            mask = ((out_tx[date_col] <= in_row[date_col]) & (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)) &
                     (out_tx[amt_col] >= in_row[amt_col] * (1 - tol)) & (out_tx[amt_col] <= in_row[amt_col] * (1 + tol)))
             
             potential_outs = out_tx[mask]
@@ -163,7 +163,7 @@ class GraphBuilder:
 
         for _, in_row in in_tx.iterrows():
             target_amt = float(in_row[amt_col])
-            potential_mask = ((out_tx[date_col] < in_row[date_col]) & 
+            potential_mask = ((out_tx[date_col] <= in_row[date_col]) & 
                               (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)))
             candidates = out_tx[potential_mask]
             if candidates.empty: continue
@@ -209,7 +209,7 @@ class GraphBuilder:
 
         for _, out_row in out_tx.iterrows():
             source_amt = float(out_row[amt_col])
-            potential_mask = ((in_tx[date_col] > out_row[date_col]) & 
+            potential_mask = ((in_tx[date_col] >= out_row[date_col]) & 
                               (in_tx[date_col] <= out_row[date_col] + pd.Timedelta(days=window)))
             candidates = in_tx[potential_mask]
             if candidates.empty: continue
