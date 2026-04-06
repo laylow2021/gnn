@@ -31,10 +31,15 @@ class GraphBuilder:
         min_tx_amt = self.config['graph'].get('min_transaction_amount', 0)
         df = df[df[amt_col] >= min_tx_amt].copy()
 
-        # Pre-process dates
+        # Pre-process dates: Handle various formats automatically
         date_col = self.mapping['date']
         if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
-            df[date_col] = pd.to_datetime(df[date_col].astype(str), format='%Y%m%d', errors='coerce')
+            # Try flexible parsing first (works for ISO, CSV standard, etc.)
+            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+            
+            # Fallback for YYYYMMDD integers if flexible parsing produced NaNs
+            if df[date_col].isna().any():
+                df[date_col] = df[date_col].fillna(pd.to_datetime(df[date_col].astype(str), format='%Y%m%d', errors='coerce'))
         
         # Calculate totals per customer for ratio denominators
         customer_totals = self._calculate_customer_totals(df)
