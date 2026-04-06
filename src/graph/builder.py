@@ -119,70 +119,72 @@ class GraphBuilder:
 
     def _match_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
         strategy = self.config['graph'].get('matching_strategy', 'exact_1_to_1')
+        used_pairs = set() # (tx_id, counterparty_id)
         
-        # Track (transaction_id, counterparty_id) pairs to prevent duplicate edges 
-        # between the same two people using the same transactions.
-        used_pairs = set()
+        all_matches = []
         
-        if strategy == 'many_to_one':
-            return self._match_many_to_one(df, used_pairs)
-        elif strategy == 'one_to_many':
-            return self._match_one_to_many(df, used_pairs)
-        elif strategy == 'hybrid':
-            m1 = self._match_many_to_one(df, used_pairs)
-            m2 = self._match_one_to_many(df, used_pairs)
-            return pd.concat([m1, m2])
-        return self._match_one_to_one(df, used_pairs)
+        # Pass 1: Always check for 1:1 matches first (Cleanest signal)
+        # This is integrated into the other strategies or run standalone
+        if strategy == 'exact_1_to_1':
+            return self._match_one_to_one(df, used_pairs)
+        
+        if strategy in ['many_to_one', 'hybrid']:
+            all_matches.append(self._match_many_to_one(df, used_pairs))
+            
+        if strategy in ['one_to_many', 'hybrid']:
+            all_matches.append(self._match_one_to_many(df, used_pairs))
+            
+        # Final Pass: Fallback to 1:1 for anything not captured by complex patterns
+        # Only if not already run as primary
+        all_matches.append(self._match_one_to_one(df, used_pairs))
+        
+        combined = pd.concat([m for m in all_matches if not m.empty])
+        if combined.empty: return combined
+        
+        # Final safety deduplication between strategy outputs
+        return combined.drop_duplicates(subset=['out_tx_id', 'in_tx_id'])
 
     def _match_one_to_one(self, df: pd.DataFrame, used_pairs: set) -> pd.DataFrame:
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
-        in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
+        in_tx = df[df[dir_col] == in_val].sort_values(date_col).copy()
+        out_tx = df[df[dir_col] == out_val].sort_values(date_col).copy()
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']
         
         for _, in_row in in_tx.iterrows():
-            # Find candidate OUTs where this (IN_TX, OUT_Cust) hasn't been used (Inclusive temporal check)
+            # Skip if this specific transaction has already been matched with ANYONE
+            # (Optional: can be relaxed to pair-level, but 1:1 usually implies transaction-level lock)
+            if (in_row[tx_id_col], None) in used_pairs: continue 
+            
             mask = ((out_tx[date_col] <= in_row[date_col]) & (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)) &
                     (out_tx[amt_col] >= in_row[amt_col] * (1 - tol)) & (out_tx[amt_col] <= in_row[amt_col] * (1 + tol)))
             
-            potential_outs = out_tx[mask]
+            potential_outs = out_tx[mask].sort_values(date_col, ascending=False)
             for _, out_row in potential_outs.iterrows():
-                # Check uniqueness of the PAIR
-                pair_in = (in_row[tx_id_col], out_row[c_id])
-                pair_out = (out_row[tx_id_col], in_row[c_id])
+                # Strict Bidirectional Pair Check
+                p1 = (in_row[tx_id_col], out_row[c_id])
+                p2 = (out_row[tx_id_col], in_row[c_id])
                 
-                if pair_in not in used_pairs and pair_out not in used_pairs:
+                if p1 not in used_pairs and p2 not in used_pairs:
                     matches.append(self._create_match_dict(out_row, in_row, min(out_row[amt_col], in_row[amt_col]), 1.0, c_id, date_col, tx_id_col, amt_col))
-                    used_pairs.add(pair_in)
-                    used_pairs.add(pair_out)
-                    break # One best match per IN transaction per strategy pass
+                    used_pairs.add(p1); used_pairs.add(p2)
+                    break 
         return pd.DataFrame(matches)
 
     def _match_many_to_one(self, df: pd.DataFrame, used_pairs: set) -> pd.DataFrame:
-        """Finds multiple OUTs (mules) summing to one large IN (hub) with pair-level uniqueness."""
+        """Finds multiple OUTs (mules) summing to one large IN (hub) with strict pair-level uniqueness."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
-        in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
+        in_tx = df[df[dir_col] == in_val].sort_values(date_col).copy(); out_tx = df[df[dir_col] == out_val].sort_values(date_col).copy()
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']
         max_depth = self.config['graph'].get('max_mule_depth', 4); min_tx = self.config['graph'].get('min_transaction_amount', 1)
 
         for _, in_row in in_tx.iterrows():
             target_amt = float(in_row[amt_col])
-            potential_mask = ((out_tx[date_col] <= in_row[date_col]) & 
-                              (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)))
+            potential_mask = ((out_tx[date_col] <= in_row[date_col]) & (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)))
             candidates = out_tx[potential_mask]
             if candidates.empty: continue
             
-            # 1:1 Match check first (with pair check)
-            one_to_one = candidates[(candidates[amt_col] >= target_amt*(1-tol)) & (candidates[amt_col] <= target_amt*(1+tol))]
-            if not one_to_one.empty:
-                out_row = one_to_one.sort_values(date_col, ascending=False).iloc[0]
-                pair_in = (in_row[tx_id_col], out_row[c_id]); pair_out = (out_row[tx_id_col], in_row[c_id])
-                if pair_in not in used_pairs:
-                    matches.append(self._create_match_dict(out_row, in_row, min(out_row[amt_col], target_amt), 1.0, c_id, date_col, tx_id_col, amt_col))
-                    used_pairs.add(pair_in); used_pairs.add(pair_out)
-                    continue
-
             # Optimized Many-to-One
             max_n = min(int(target_amt // min_tx), max_depth)
             for n in range(2, max_n + 1):
@@ -190,44 +192,35 @@ class GraphBuilder:
                 part_mask = (candidates[amt_col] >= part_amt*(1-tol)) & (candidates[amt_col] <= part_amt*(1+tol))
                 parts = candidates[part_mask]
                 
-                # Check if enough parts haven't been used with this Hub Hub
+                # Check for available (unused) pairs
                 available_parts = []
                 for _, p_row in parts.iterrows():
-                    if (p_row[tx_id_col], in_row[c_id]) not in used_pairs:
+                    p1 = (in_row[tx_id_col], p_row[c_id])
+                    p2 = (p_row[tx_id_col], in_row[c_id])
+                    if p1 not in used_pairs and p2 not in used_pairs:
                         available_parts.append(p_row)
                 
                 if len(available_parts) >= n:
                     for i in range(n):
                         out_row = available_parts[i]
                         matches.append(self._create_match_dict(out_row, in_row, out_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
-                        used_pairs.add((out_row[tx_id_col], in_row[c_id]))
                         used_pairs.add((in_row[tx_id_col], out_row[c_id]))
+                        used_pairs.add((out_row[tx_id_col], in_row[c_id]))
                     break 
         return pd.DataFrame(matches)
 
     def _match_one_to_many(self, df: pd.DataFrame, used_pairs: set) -> pd.DataFrame:
-        """Finds one large OUT (hub) distributed into multiple smaller INs (mules) with pair-level uniqueness."""
+        """Finds one large OUT (hub) distributed into multiple smaller INs (mules) with strict pair-level uniqueness."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
-        in_tx = df[df[dir_col] == in_val].copy(); out_tx = df[df[dir_col] == out_val].copy()
+        in_tx = df[df[dir_col] == in_val].sort_values(date_col).copy(); out_tx = df[df[dir_col] == out_val].sort_values(date_col).copy()
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']; max_depth = self.config['graph'].get('max_mule_depth', 4); min_tx = self.config['graph'].get('min_transaction_amount', 1)
 
         for _, out_row in out_tx.iterrows():
             source_amt = float(out_row[amt_col])
-            potential_mask = ((in_tx[date_col] >= out_row[date_col]) & 
-                              (in_tx[date_col] <= out_row[date_col] + pd.Timedelta(days=window)))
+            potential_mask = ((in_tx[date_col] >= out_row[date_col]) & (in_tx[date_col] <= out_row[date_col] + pd.Timedelta(days=window)))
             candidates = in_tx[potential_mask]
             if candidates.empty: continue
-
-            # 1:1 Match check first (with pair check)
-            one_to_one = candidates[(candidates[amt_col] >= source_amt*(1-tol)) & (candidates[amt_col] <= source_amt*(1+tol))]
-            if not one_to_one.empty:
-                in_row = one_to_one.sort_values(date_col, ascending=True).iloc[0]
-                pair_in = (in_row[tx_id_col], out_row[c_id]); pair_out = (out_row[tx_id_col], in_row[c_id])
-                if pair_out not in used_pairs:
-                    matches.append(self._create_match_dict(out_row, in_row, min(source_amt, in_row[amt_col]), 1.0, c_id, date_col, tx_id_col, amt_col))
-                    used_pairs.add(pair_out); used_pairs.add(pair_in)
-                    continue
 
             # Optimized One-to-Many
             max_n = min(int(source_amt // min_tx), max_depth)
@@ -236,10 +229,11 @@ class GraphBuilder:
                 part_mask = (candidates[amt_col] >= part_amt*(1-tol)) & (candidates[amt_col] <= part_amt*(1+tol))
                 parts = candidates[part_mask]
 
-                # Check if enough parts haven't been used with this Hub
                 available_parts = []
                 for _, p_row in parts.iterrows():
-                    if (p_row[tx_id_col], out_row[c_id]) not in used_pairs:
+                    p1 = (out_row[tx_id_col], p_row[c_id])
+                    p2 = (p_row[tx_id_col], out_row[c_id])
+                    if p1 not in used_pairs and p2 not in used_pairs:
                         available_parts.append(p_row)
 
                 if len(available_parts) >= n:
