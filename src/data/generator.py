@@ -33,10 +33,36 @@ def generate_transactions(
     # Inject AML Typologies
     tx_df = _inject_pass_through(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
     tx_df = _inject_repeated_layering(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
+    tx_df = _inject_persistent_link(tx_df, int(num_customers * anomaly_ratio * 0.1), date_range, num_customers)
     tx_df = _inject_daily_self_passthrough(tx_df, int(num_customers * anomaly_ratio * 0.1), date_range, num_customers)
     tx_df = _inject_fan_in(tx_df, int(num_customers * anomaly_ratio * 0.4), date_range, num_customers)
     
     return tx_df.sort_values('date').reset_index(drop=True)
+
+def _inject_persistent_link(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
+    """Inject a pair with 5 identical transactions over 5 consecutive days. Label: 5"""
+    new_rows = []
+    base_id = df['transaction_id'].max() + 1
+    
+    for _ in range(num_typologies):
+        source_id = np.random.randint(0, num_customers)
+        target_id = np.random.randint(0, num_customers)
+        while target_id == source_id:
+            target_id = np.random.randint(0, num_customers)
+            
+        # Constant amount for all 5 days
+        amount = np.round(np.random.uniform(1000, 5000), 2)
+        start_day_idx = np.random.randint(0, len(date_range) - 6)
+        
+        for d in range(5):
+            current_date = date_range[start_day_idx + d]
+            # OUT
+            new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'OUT', 'label': 5})
+            # IN (Same Day)
+            new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'IN', 'label': 5})
+            base_id += 2
+            
+    return pd.concat([df, pd.DataFrame(new_rows)])
 
 def _inject_daily_self_passthrough(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
     """Inject same-day self-loop passthroughs for consecutive days. Label: 4"""
