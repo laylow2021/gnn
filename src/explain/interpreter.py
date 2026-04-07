@@ -46,7 +46,8 @@ class AnomalyInterpreter:
 
         # 1. Bar Chart (Existing)
         plt.figure(figsize=(10, 5))
-        sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='viridis', legend=False)
+        ax = sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='viridis')
+        if ax.get_legend(): ax.get_legend().remove()
         plt.title("Global Node Feature Importance (Bar: Mean Error)")
         if pdf:
             pdf.savefig()
@@ -59,7 +60,8 @@ class AnomalyInterpreter:
         # Log scale often helps visualize MSE distributions which are usually heavily skewed
         error_dist_melted = error_dist_df.melt(var_name='Feature', value_name='MSE')
         plt.figure(figsize=(10, 6))
-        sns.violinplot(data=error_dist_melted, x='MSE', y='Feature', hue='Feature', palette='viridis', inner="quart", legend=False)
+        ax = sns.violinplot(data=error_dist_melted, x='MSE', y='Feature', hue='Feature', palette='viridis', inner="quart")
+        if ax.get_legend(): ax.get_legend().remove()
         plt.xscale('log')
         plt.title("Global Node Error Distribution (Violin: Quartiles & Density)")
         plt.grid(True, which="both", ls="-", alpha=0.2)
@@ -87,7 +89,8 @@ class AnomalyInterpreter:
 
         # 1. Bar Chart
         plt.figure(figsize=(10, 5))
-        sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='magma', legend=False)
+        ax = sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='magma')
+        if ax.get_legend(): ax.get_legend().remove()
         plt.title("Global Edge Feature Importance (Bar: Mean Error)")
         if pdf:
             pdf.savefig()
@@ -99,7 +102,8 @@ class AnomalyInterpreter:
         error_dist_df = pd.DataFrame(errors_np, columns=feat_names)
         error_dist_melted = error_dist_df.melt(var_name='Feature', value_name='MSE')
         plt.figure(figsize=(10, 6))
-        sns.violinplot(data=error_dist_melted, x='MSE', y='Feature', hue='Feature', palette='magma', inner="quart", legend=False)
+        ax = sns.violinplot(data=error_dist_melted, x='MSE', y='Feature', hue='Feature', palette='magma', inner="quart")
+        if ax.get_legend(): ax.get_legend().remove()
         plt.xscale('log')
         plt.title("Global Edge Error Distribution (Violin: Quartiles & Density)")
         plt.grid(True, which="both", ls="-", alpha=0.2)
