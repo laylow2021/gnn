@@ -7,13 +7,14 @@ import seaborn as sns
 from typing import Dict, Any, List, Optional
 import numpy as np
 import os
+from matplotlib.backends.backend_pdf import PdfPages
 
 class AnomalyInterpreter:
     def __init__(self, model: torch.nn.Module, config: Dict[str, Any]):
         self.model = model
         self.config = config
 
-    def plot_loss_curves(self, history: Dict[str, List[float]]):
+    def plot_loss_curves(self, history: Dict[str, List[float]], pdf: Optional[PdfPages] = None):
         """Plot total, node, and edge loss over epochs."""
         plt.figure(figsize=(10, 6))
         for label, values in history.items():
@@ -23,9 +24,13 @@ class AnomalyInterpreter:
         plt.title("Training Loss Components")
         plt.legend()
         plt.grid(True, alpha=0.3)
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
-    def explain_node_anomalies(self, x: torch.Tensor, x_recon: torch.Tensor):
+    def explain_node_anomalies(self, x: torch.Tensor, x_recon: torch.Tensor, pdf: Optional[PdfPages] = None):
         """Visualizes global node feature importance using Bar, Violin, and Waterfall plots."""
         per_feature_error = (x - x_recon)**2
         errors_np = per_feature_error.detach().cpu().numpy()
@@ -43,7 +48,11 @@ class AnomalyInterpreter:
         plt.figure(figsize=(10, 5))
         sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='viridis', legend=False)
         plt.title("Global Node Feature Importance (Bar: Mean Error)")
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
         # 2. Violin Plot (Distribution of errors)
         error_dist_df = pd.DataFrame(errors_np, columns=feat_names)
@@ -54,15 +63,19 @@ class AnomalyInterpreter:
         plt.xscale('log')
         plt.title("Global Node Error Distribution (Violin: Quartiles & Density)")
         plt.grid(True, which="both", ls="-", alpha=0.2)
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
         # 3. Waterfall Plot (Contribution to Total Average Error)
         self._plot_waterfall(importance_df['Feature'].tolist(), importance_df['Importance (Mean MSE)'].tolist(), 
-                             "Global Node Risk Decomposition (Waterfall)")
+                             "Global Node Risk Decomposition (Waterfall)", pdf=pdf)
         
         return importance_df
 
-    def explain_edge_anomalies(self, edge_attr: torch.Tensor, edge_attr_recon: torch.Tensor):
+    def explain_edge_anomalies(self, edge_attr: torch.Tensor, edge_attr_recon: torch.Tensor, pdf: Optional[PdfPages] = None):
         """Visualizes global edge feature importance using Bar, Violin, and Waterfall plots."""
         per_feat_error = (edge_attr - edge_attr_recon)**2
         errors_np = per_feat_error.detach().cpu().numpy()
@@ -76,7 +89,11 @@ class AnomalyInterpreter:
         plt.figure(figsize=(10, 5))
         sns.barplot(data=importance_df, x='Importance (Mean MSE)', y='Feature', hue='Feature', palette='magma', legend=False)
         plt.title("Global Edge Feature Importance (Bar: Mean Error)")
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
         # 2. Violin Plot
         error_dist_df = pd.DataFrame(errors_np, columns=feat_names)
@@ -86,13 +103,17 @@ class AnomalyInterpreter:
         plt.xscale('log')
         plt.title("Global Edge Error Distribution (Violin: Quartiles & Density)")
         plt.grid(True, which="both", ls="-", alpha=0.2)
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
         # 3. Waterfall Plot
         self._plot_waterfall(importance_df['Feature'].tolist(), importance_df['Importance (Mean MSE)'].tolist(), 
-                             "Global Edge Risk Decomposition (Waterfall)")
+                             "Global Edge Risk Decomposition (Waterfall)", pdf=pdf)
 
-    def _plot_waterfall(self, labels: List[str], values: List[float], title: str):
+    def _plot_waterfall(self, labels: List[str], values: List[float], title: str, pdf: Optional[PdfPages] = None):
         """Custom Waterfall plot using Matplotlib."""
         data = pd.DataFrame({'label': labels, 'value': values})
         data['cumulative'] = data['value'].cumsum().shift(1).fillna(0)
@@ -120,11 +141,15 @@ class AnomalyInterpreter:
         plt.title(title)
         plt.grid(axis='y', alpha=0.3)
         plt.tight_layout()
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
     def local_perspective(self, node_id: int, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
                           num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None,
-                          min_edge_risk_quantile: float = 0.0):
+                          min_edge_risk_quantile: float = 0.0, pdf: Optional[PdfPages] = None):
         """Enhanced neighborhood view with financial labels and volume-based node scaling."""
         self.model.eval()
         
@@ -150,8 +175,6 @@ class AnomalyInterpreter:
             labels[n_idx] = orig_id
             
         # 3. Add edges and calculate node volumes for sizing
-        print(f"\n--- Neighborhood Edge Details (Edges > {min_edge_risk_quantile*100:.0f}th percentile risk) ---")
-        edges_found = False
         edge_labels = {}
         for i, (idx, row) in enumerate(collapsed_sub.iterrows()):
             mse_val = sub_edge_mse[i]
@@ -167,13 +190,7 @@ class AnomalyInterpreter:
                 # Format label (e.g. $5.5k or $900)
                 label_str = f"${amt/1000:.1f}k" if amt >= 1000 else f"${amt:.0f}"
                 edge_labels[(u, v)] = label_str
-                
-                print(f"Customer {row['source_id']} (OUT) -> Customer {row['target_id']} (IN) | Amount: ${amt:,.2f} | Edge MSE: {mse_val:.4f}")
-                edges_found = True
         
-        if not edges_found:
-            print("No edges found in this neighborhood above the risk threshold.")
-            
         nodes_to_remove = [n for n in G.nodes() if G.degree(n) == 0 and n != node_id]
         G.remove_nodes_from(nodes_to_remove)
 
@@ -181,7 +198,7 @@ class AnomalyInterpreter:
         edge_high_risk_threshold = torch.quantile(edge_mse, 0.95).item()
         
         plt.figure(figsize=(12, 10))
-        pos = nx.spring_layout(G, seed=42, k=0.5) # Increased k for label space
+        pos = nx.spring_layout(G, seed=42, k=0.5) 
         
         node_colors = []
         for n in G.nodes():
@@ -194,73 +211,58 @@ class AnomalyInterpreter:
             if G.edges[u, v]['mse'] >= edge_high_risk_threshold: edge_colors.append('red')
             else: edge_colors.append('gray')
             
-        # Draw main graph with constant node size 800
         nx.draw(G, pos, labels={n: labels[n] for n in G.nodes()}, with_labels=True, 
                 node_color=node_colors, edge_color=edge_colors, node_size=800, 
                 alpha=0.8, width=2, arrows=True, arrowsize=20, connectionstyle='arc3,rad=0.1')
         
-        # Draw edge labels (Dollar amounts)
         nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=10, font_color='darkgreen')
         
         target_label = labels.get(node_id, node_id)
         plt.title(f"{num_hops}-Hop Neighborhood for Customer: {target_label}\n"
                   f"(Green Labels = Total Amount | Red = High Risk)")
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
-    def get_subgraph_data(self, node_id: int, data: Any, num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None):
-        """
-        Extract a localized subgraph including tensors and human-readable DataFrames.
-        """
-        subset, edge_index_sub, mapping, edge_mask = k_hop_subgraph(
-            node_id, num_hops, data.edge_index, relabel_nodes=True
-        )
-        
-        # 1. Tensors
-        sub_x = data.x[subset]
-        sub_edge_attr = data.edge_attr[edge_mask]
-        
-        # 2. Human-Readable Node DF
-        node_features = self.config['graph']['node_features']
-        sub_nodes_df = pd.DataFrame(sub_x.cpu().numpy(), columns=node_features)
-        sub_nodes_df['node_idx'] = subset.cpu().numpy()
-        if inv_map:
-            sub_nodes_df['customer_id'] = sub_nodes_df['node_idx'].map(inv_map)
-            
-        # 3. Human-Readable Edge DF (with audit trail)
-        sub_edges_df = data.collapsed_edges_df.iloc[edge_mask.cpu().numpy()].copy()
-        
-        return {
-            'x': sub_x,
-            'edge_index': edge_index_sub,
-            'edge_attr': sub_edge_attr,
-            'nodes_df': sub_nodes_df,
-            'edges_df': sub_edges_df
-        }
-
-    def global_perspective(self, edge_mse: torch.Tensor):
+    def global_perspective(self, edge_mse: torch.Tensor, pdf: Optional[PdfPages] = None):
         plt.figure(figsize=(10, 6))
         sns.histplot(edge_mse.detach().cpu().numpy(), bins=50, kde=True, color='purple')
         plt.title("Distribution of Edge Reconstruction Errors")
-        plt.show()
+        if pdf:
+            pdf.savefig()
+            plt.close()
+        else:
+            plt.show()
 
     def save_anomalies_to_excel(self, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
                                tx_df: pd.DataFrame, output_path: str, inv_map: Optional[Dict[int, Any]] = None,
                                node_top_percent: float = 0.05, edge_top_percent: float = 0.05):
         """
         Export filtered ranked anomalies to Excel and return full DataFrames.
-        node_top_percent/edge_top_percent define what is written to Excel.
+        Includes feature-level MSE decomposition and merged raw transactions.
         """
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         c_id_col = self.config['data']['column_mapping']['customer_id']
 
-        # 1. Prepare Full Node Anomalies DF
+        # 1. Prepare Full Node Anomalies DF with Feature Decomposition
+        # Re-calculate reconstructions to get per-feature MSE
+        self.model.eval()
+        with torch.no_grad():
+            _, x_recon, edge_attr_recon = self.model(data.x, data.edge_index, data.edge_attr)
+        
         node_features = self.config['graph'].get('node_features', [])
         x_np = data.x.cpu().numpy()
         if not node_features or len(node_features) != x_np.shape[1]:
             node_features = [f"feat_{i}" for i in range(x_np.shape[1])]
             if len(node_features) == 1: node_features = ['tx_count']
 
+        node_mse_per_feat = (data.x - x_recon)**2
         node_df_full = pd.DataFrame(x_np, columns=node_features)
+        for i, feat in enumerate(node_features):
+            node_df_full[f'mse_{feat}'] = node_mse_per_feat[:, i].cpu().numpy()
+            
         node_df_full['node_idx'] = range(len(node_df_full))
         if inv_map:
             node_df_full['customer_id'] = node_df_full['node_idx'].map(inv_map)
@@ -269,8 +271,14 @@ class AnomalyInterpreter:
         node_df_full['anomaly_score'] = node_mse.cpu().numpy()
         node_df_full = node_df_full.sort_values('anomaly_score', ascending=False)
 
-        # 2. Prepare Full Edge Anomalies DF
+        # 2. Prepare Full Edge Anomalies DF with Feature Decomposition
+        edge_features = self.config['graph']['edge_features']
+        edge_mse_per_feat = (data.edge_attr - edge_attr_recon)**2
+        
         edge_df_full = data.collapsed_edges_df.copy()
+        for i, feat in enumerate(edge_features):
+            edge_df_full[f'mse_{feat}'] = edge_mse_per_feat[:, i].cpu().numpy()
+            
         edge_df_full['edge_anomaly_score'] = edge_mse.cpu().numpy()
         edge_df_full['source_node_score'] = node_mse[edge_df_full['source'].values].cpu().numpy()
         edge_df_full['target_node_score'] = node_mse[edge_df_full['target'].values].cpu().numpy()
@@ -294,17 +302,15 @@ class AnomalyInterpreter:
             node_df_excel.to_excel(writer, sheet_name='Top Node Anomalies', index=False)
             edge_df_excel.to_excel(writer, sheet_name='Top Edge Anomalies', index=False)
 
-            # Transaction details for Top Node Anomalies
+            # Combined Raw Transactions for Top Node and Edge Anomalies
             top_node_ids = node_df_excel['customer_id'].tolist()
-            node_context = tx_df[tx_df[c_id_col].isin(top_node_ids)]
-            node_context.to_excel(writer, sheet_name='Top Node Raw TX', index=False)
-
-            # Transaction details for Top Edge Anomalies (Source and Target customers)
             top_edge_sources = edge_df_excel['source_id'].tolist()
             top_edge_targets = edge_df_excel['target_id'].tolist()
-            edge_customer_ids = list(set(top_edge_sources + top_edge_targets))
-            edge_context = tx_df[tx_df[c_id_col].isin(edge_customer_ids)]
-            edge_context.to_excel(writer, sheet_name='Top Edge Raw TX', index=False)
+            
+            all_involved_customer_ids = list(set(top_node_ids + top_edge_sources + top_edge_targets))
+            
+            merged_raw_tx = tx_df[tx_df[c_id_col].isin(all_involved_customer_ids)].drop_duplicates()
+            merged_raw_tx.to_excel(writer, sheet_name='Top Anomaly Raw TX', index=False)
 
         print(f"Exported top {node_top_percent*100:.1f}% nodes and {edge_top_percent*100:.1f}% edges to {output_path}")
         return node_df_full, edge_df_full
