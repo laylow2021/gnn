@@ -125,18 +125,29 @@ class AnomalyInterpreter:
     def local_perspective(self, node_id: int, data: Any, node_mse: torch.Tensor, edge_mse: torch.Tensor, 
                           num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None,
                           min_edge_risk_quantile: float = 0.0):
-        """Enhanced neighborhood view with hops, original ID labels, and risk-based edge filtering."""
+        """Enhanced neighborhood view with guaranteed bidirectional edge discovery."""
         self.model.eval()
-        subset, edge_index_sub, mapping, edge_mask = k_hop_subgraph(
-            node_id, num_hops, data.edge_index, relabel_nodes=False
+        
+        # 1. Robust Bidirectional Node Discovery
+        # We use an undirected version of the edges to find the k-hop neighborhood subset
+        # This ensures we find both senders and receivers.
+        from torch_geometric.utils import to_undirected
+        undirected_index = to_undirected(data.edge_index)
+        subset, _, _, _ = k_hop_subgraph(
+            node_id, num_hops, undirected_index, relabel_nodes=False
         )
+        
+        # 2. Edge Recovery
+        # Now we identify all edges in the ORIGINAL directed graph that connect any two nodes in our subset.
+        edge_mask = torch.isin(data.edge_index[0], subset) & torch.isin(data.edge_index[1], subset)
         
         # Calculate edge risk threshold
         edge_threshold_val = torch.quantile(edge_mse, min_edge_risk_quantile).item()
         
-        G = nx.Graph()
+        # Use DiGraph for directed edges (Source -> Target)
+        G = nx.DiGraph()
         
-        # Determine labels: Use original IDs if inv_map is provided
+        # Determine labels
         labels = {}
         for n_idx in subset.tolist():
             orig_id = inv_map.get(n_idx, n_idx) if inv_map else n_idx
@@ -146,13 +157,23 @@ class AnomalyInterpreter:
         sub_edges = data.edge_index[:, edge_mask].cpu().numpy()
         sub_edge_mse = edge_mse[edge_mask].cpu().numpy()
         
-        # Add edges ONLY if they exceed the risk quantile
+        # 3. Add edges based on risk threshold
+        print(f"\n--- Neighborhood Edge Details (Edges > {min_edge_risk_quantile*100:.0f}th percentile risk) ---")
+        edges_found = False
         for i in range(sub_edges.shape[1]):
             if sub_edge_mse[i] >= edge_threshold_val:
                 u, v = sub_edges[:, i]
                 G.add_edge(u, v, mse=sub_edge_mse[i])
+                
+                src_id = labels.get(u, u)
+                tgt_id = labels.get(v, v)
+                print(f"Customer {src_id} (OUT) -> Customer {tgt_id} (IN) | Edge MSE: {sub_edge_mse[i]:.4f}")
+                edges_found = True
+        
+        if not edges_found:
+            print("No edges found in this neighborhood above the risk threshold.")
             
-        # Remove isolated nodes that might have resulted from edge filtering (except the target node)
+        # Clean up isolated nodes (except the center node)
         nodes_to_remove = [n for n in G.nodes() if G.degree(n) == 0 and n != node_id]
         G.remove_nodes_from(nodes_to_remove)
 
@@ -160,25 +181,28 @@ class AnomalyInterpreter:
         edge_high_risk_threshold = torch.quantile(edge_mse, 0.95).item()
         
         plt.figure(figsize=(12, 10))
+        # Use a fixed seed for consistent layout during investigation
         pos = nx.spring_layout(G, seed=42)
         
         node_colors = []
         for n in G.nodes():
-            if n == node_id: node_colors.append('red')
-            elif G.nodes[n]['mse'] >= node_threshold: node_colors.append('orange')
-            else: node_colors.append('skyblue')
+            if n == node_id: node_colors.append('red') # Target node is Red
+            elif G.nodes[n]['mse'] >= node_threshold: node_colors.append('orange') # Other High Risk is Orange
+            else: node_colors.append('skyblue') # Normal is Skyblue
             
         edge_colors = []
         for u, v in G.edges():
-            if G.edges[u, v]['mse'] >= edge_high_risk_threshold: edge_colors.append('red')
-            else: edge_colors.append('gray')
+            if G.edges[u, v]['mse'] >= edge_high_risk_threshold: edge_colors.append('red') # High Risk Edge is Red
+            else: edge_colors.append('gray') # Normal Edge is Gray
             
-        nx.draw(G, pos, labels={n: labels[n] for n in G.nodes()}, with_labels=True, node_color=node_colors, 
-                edge_color=edge_colors, node_size=800, alpha=0.8, width=2)
+        # Draw with arrows and curved lines to handle potential bidirectional flows
+        nx.draw(G, pos, labels={n: labels[n] for n in G.nodes()}, with_labels=True, 
+                node_color=node_colors, edge_color=edge_colors, node_size=800, 
+                alpha=0.8, width=2, arrows=True, arrowsize=20, connectionstyle='arc3,rad=0.1')
         
         target_label = labels.get(node_id, node_id)
         plt.title(f"{num_hops}-Hop Neighborhood for Customer: {target_label}\n"
-                  f"(Filtered to Edges > {min_edge_risk_quantile*100:.0f}th percentile risk)")
+                  f"(Showing both Incoming and Outgoing suspicious links)")
         plt.show()
 
     def get_subgraph_data(self, node_id: int, data: Any, num_hops: int = 1, inv_map: Optional[Dict[int, Any]] = None):
