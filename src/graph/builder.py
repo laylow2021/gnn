@@ -87,6 +87,19 @@ class GraphBuilder:
         
         return data
 
+    def _calculate_customer_totals(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
+        c_id = self.mapping['customer_id']
+        dir_col = self.mapping['direction']
+        amt_col = self.mapping['amount']
+        in_val = self.mapping['direction_in']
+        out_val = self.mapping['direction_out']
+        
+        totals = df.groupby([c_id, dir_col])[amt_col].sum().unstack(fill_value=0.0)
+        return {
+            'in': totals.get(in_val, pd.Series(0.0, index=totals.index)),
+            'out': totals.get(out_val, pd.Series(0.0, index=totals.index))
+        }
+
     def _calculate_node_features(self, df: pd.DataFrame) -> pd.DataFrame:
         c_id = self.mapping['customer_id']
         node_feats = self.config['graph'].get('node_features', [])
