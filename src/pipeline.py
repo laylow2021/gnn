@@ -3,8 +3,8 @@ import yaml
 import os
 import pandas as pd
 from typing import Dict, Any, Optional
-from src.data.processor import DataProcessor
-from src.features.classical import ClassicalLayer
+# from src.data.processor import DataProcessor
+# from src.features.classical import ClassicalLayer
 from src.graph.builder import GraphBuilder
 from src.models.gnn import AMLGraphAutoencoder, compute_combined_loss
 from src.utils.reproducibility import get_device, save_checkpoint, load_checkpoint
@@ -19,8 +19,8 @@ class AMLPipeline:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.device = get_device(config)
-        self.processor = DataProcessor(config)
-        self.classical = ClassicalLayer(config)
+        # self.processor = DataProcessor(config)
+        # self.classical = ClassicalLayer(config)
         self.graph_builder = GraphBuilder(config)
         self.model = None
         self.node_scaler = None
@@ -28,14 +28,17 @@ class AMLPipeline:
 
     def train(self, raw_tx_df: pd.DataFrame):
         """Full end-to-end training pipeline."""
-        print("1. Cleaning and Aggregating Data...")
-        clean_df = self.processor.clean(raw_tx_df)
-        cust_df = self.processor.aggregate_to_customer(clean_df)
+        # print("1. Cleaning and Aggregating Data...")
+        # clean_df = self.processor.clean(raw_tx_df)
+        # cust_df = self.processor.aggregate_to_customer(clean_df)
 
-        print("2. Running Classical ML (Clustering & IForest)...")
-        enriched_cust_df = self.classical.fit_predict(cust_df)
+        # print("2. Running Classical ML (Clustering & IForest)...")
+        # enriched_cust_df = self.classical.fit_predict(cust_df)
+        
+        # Temporary bypass until modules are ready:
+        clean_df = raw_tx_df 
 
-        print("3. Building Graph with Combined Features...")
+        print("3. Building Graph...")
         data = self.graph_builder.build_graph(clean_df)
         
         print("4. Training GNN Autoencoder...")
