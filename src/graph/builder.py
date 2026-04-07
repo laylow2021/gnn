@@ -17,9 +17,14 @@ class GraphBuilder:
         """Construct a homogeneous PyG graph with raw node/edge features (unscaled)."""
         c_id = self.mapping['customer_id']
         
-        # 0. ID Mapping (Support for strings/non-contiguous IDs)
-        unique_ids = sorted(tx_df[c_id].unique())
-        self.customer_map = {original: i for i, original in enumerate(unique_ids)}
+        # 0. ID Mapping: Maintain consistency if customers already mapped
+        current_unique_ids = sorted(tx_df[c_id].unique())
+        
+        # If mapping is empty or we have new customers, we must (re)build
+        # To support pure inductive inference on new customers, we rebuild.
+        # To support persistent nodes, we could merge, but here we prioritize 
+        # local consistency for the provided tx_df.
+        self.customer_map = {original: i for i, original in enumerate(current_unique_ids)}
         self.inv_customer_map = {i: original for original, i in self.customer_map.items()}
         
         # Apply mapping to a copy for graph construction
@@ -29,34 +34,31 @@ class GraphBuilder:
         # 1. Min Transaction Amount Filter
         amt_col = self.mapping['amount']
         min_tx_amt = self.config['graph'].get('min_transaction_amount', 0)
-        df = df[df[amt_col] >= min_tx_amt].copy()
+        df_filtered = df[df[amt_col] >= min_tx_amt].copy()
 
         # Pre-process dates: Handle various formats automatically
         date_col = self.mapping['date']
-        if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
-            # Try flexible parsing first (works for ISO, CSV standard, etc.)
-            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-            
-            # Fallback for YYYYMMDD integers if flexible parsing produced NaNs
-            if df[date_col].isna().any():
-                df[date_col] = df[date_col].fillna(pd.to_datetime(df[date_col].astype(str), format='%Y%m%d', errors='coerce'))
+        for frame in [df, df_filtered]:
+            if not pd.api.types.is_datetime64_any_dtype(frame[date_col]):
+                frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce')
         
-        # Calculate totals per customer for ratio denominators
-        customer_totals = self._calculate_customer_totals(df)
+        # Calculate totals per customer (using unfiltered df for baseline features if needed, 
+        # but here we follow the filtered flow for edge ratios)
+        customer_totals = self._calculate_customer_totals(df_filtered)
         
-        node_features_df = self._calculate_node_features(df)
-        edges_df = self._match_transactions(df)
+        # Node features must cover ALL mapped customers
+        node_features_df = self._calculate_node_features(df_filtered)
+        
+        edges_df = self._match_transactions(df_filtered)
         collapsed_edges = self._collapse_edges(edges_df, customer_totals)
         
-        # 2. Min Edge Flow Ratio Filter
+        # 2. Filters (Ratio, Frequency, Scarcity)
         min_ratio = self.config['graph'].get('min_edge_flow_ratio', 0)
         collapsed_edges = collapsed_edges[(collapsed_edges['inflow_ratio'] >= min_ratio) | 
                                           (collapsed_edges['outflow_ratio'] >= min_ratio)].copy()
 
-        # 3. Frequency & Scarcity Filters (Noise Reduction)
         min_freq = self.config['graph'].get('min_edge_frequency', 1)
         min_scarcity = self.config['graph'].get('min_scarcity_threshold', 0.0)
-        
         collapsed_edges = collapsed_edges[
             (collapsed_edges['edge_frequency'] >= min_freq) & 
             (collapsed_edges['mean_scarcity'] >= min_scarcity)
@@ -66,7 +68,6 @@ class GraphBuilder:
             edge_index = torch.empty((2, 0), dtype=torch.long)
             edge_attr = torch.empty((0, len(self.config['graph']['edge_features'])), dtype=torch.float)
         else:
-            # Create edge_index using the integer-mapped columns
             edge_index = torch.tensor(collapsed_edges[['source', 'target']].values.T, dtype=torch.long)
             edge_attr_cols = self.config['graph']['edge_features']
             edge_attr = torch.tensor(collapsed_edges[edge_attr_cols].values, dtype=torch.float)
@@ -74,47 +75,30 @@ class GraphBuilder:
         # Final Node Features Construction
         x = torch.tensor(node_features_df.values, dtype=torch.float)
         
-        # Explicitly check for NaNs/Infs and fail if found
         if torch.isnan(x).any() or torch.isnan(edge_attr).any():
-            raise ValueError("Graph features contain NaNs. Imputation must be handled during preprocessing.")
+            raise ValueError("Graph features contain NaNs.")
 
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
         
-        # Add original IDs back to collapsed_edges for audit trails
+        # Audit trails
         collapsed_edges['source_id'] = collapsed_edges['source'].map(self.inv_customer_map)
         collapsed_edges['target_id'] = collapsed_edges['target'].map(self.inv_customer_map)
         data.collapsed_edges_df = collapsed_edges
         
         return data
 
-    def _calculate_customer_totals(self, df: pd.DataFrame) -> Dict[str, pd.Series]:
-        c_id = self.mapping['customer_id']
-        dir_col = self.mapping['direction']
-        amt_col = self.mapping['amount']
-        in_val = self.mapping['direction_in']
-        out_val = self.mapping['direction_out']
-        
-        totals = df.groupby([c_id, dir_col])[amt_col].sum().unstack(fill_value=0.0)
-        return {
-            'in': totals.get(in_val, pd.Series(0.0, index=totals.index)),
-            'out': totals.get(out_val, pd.Series(0.0, index=totals.index))
-        }
-
     def _calculate_node_features(self, df: pd.DataFrame) -> pd.DataFrame:
         c_id = self.mapping['customer_id']
         node_feats = self.config['graph'].get('node_features', [])
         
         if not node_feats:
-            # If no features defined, return a default identity or count if possible, 
-            # but usually, node_features should be defined.
             features = df.groupby(c_id).size().to_frame('tx_count')
         else:
-            # Aggregate all configured columns from the input data (mean by default)
             features = df.groupby(c_id)[node_feats].mean()
 
-        # Reindex to cover all customers and fill with 0 to ensure continuous indices
-        max_cust = df[c_id].max()
-        all_customers = pd.DataFrame(index=range(max_cust + 1))
+        # CRITICAL: Reindex to cover ALL customers in the original mapping
+        # This prevents node misalignment when high-ID customers are filtered out
+        all_customers = pd.DataFrame(index=range(len(self.customer_map)))
         return all_customers.join(features).fillna(0)
 
     def _match_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
