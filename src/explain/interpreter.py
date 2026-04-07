@@ -100,9 +100,12 @@ class AnomalyInterpreter:
         
         fig, ax = plt.subplots(figsize=(10, 6))
         
+        # Use a robust colormap access
+        cmap = plt.get_cmap('tab20c')
+        
         # Plot the bars
         for i, row in data.iterrows():
-            color = plt.cm.get_cmap('tab20c')(i % 20)
+            color = cmap(i % 20)
             ax.bar(row['label'], row['value'], bottom=row['cumulative'], color=color, edgecolor='black', alpha=0.8)
             # Add connector lines
             if i > 0:
