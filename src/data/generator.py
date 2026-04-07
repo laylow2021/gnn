@@ -30,14 +30,50 @@ def generate_transactions(
         'label': 0  # 0: Normal
     })
     
-    # Inject AML Typologies
-    tx_df = _inject_pass_through(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
-    tx_df = _inject_repeated_layering(tx_df, int(num_customers * anomaly_ratio * 0.2), date_range, num_customers)
-    tx_df = _inject_persistent_link(tx_df, int(num_customers * anomaly_ratio * 0.1), date_range, num_customers)
-    tx_df = _inject_daily_self_passthrough(tx_df, int(num_customers * anomaly_ratio * 0.1), date_range, num_customers)
-    tx_df = _inject_fan_in(tx_df, int(num_customers * anomaly_ratio * 0.4), date_range, num_customers)
+    # Define OOT range for anomalies (starting Feb 1st, 2026 if num_days >= 31)
+    # The split in the notebook is '2026-02-01'
+    oot_start_idx = 31
+    if len(date_range) > oot_start_idx:
+        oot_date_range = date_range[oot_start_idx:]
+        
+        # Inject AML Typologies only in OOT
+        tx_df = _inject_pass_through(tx_df, int(num_customers * anomaly_ratio * 0.2), oot_date_range, num_customers)
+        tx_df = _inject_repeated_layering(tx_df, int(num_customers * anomaly_ratio * 0.2), oot_date_range, num_customers)
+        tx_df = _inject_persistent_link(tx_df, int(num_customers * anomaly_ratio * 0.1), oot_date_range, num_customers)
+        tx_df = _inject_daily_self_passthrough(tx_df, int(num_customers * anomaly_ratio * 0.1), oot_date_range, num_customers)
+        tx_df = _inject_fan_in(tx_df, int(num_customers * anomaly_ratio * 0.4), oot_date_range, num_customers)
+        
+        # Inject Specific Pass-Through (Label 6)
+        tx_df = _inject_specific_pass_through(tx_df, oot_date_range, num_customers)
     
     return tx_df.sort_values('date').reset_index(drop=True)
+
+def _inject_specific_pass_through(df: pd.DataFrame, oot_date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
+    """Inject specific 1:1 matching OUT/IN over 5 consecutive days. Label: 6"""
+    new_rows = []
+    base_id = df['transaction_id'].max() + 1
+    
+    # Customer A (Source) and Customer B (Target)
+    source_id = num_customers + 100
+    target_id = num_customers + 101
+    
+    amounts = [900, 1000, 1100, 1200, 1300]
+    
+    # Ensure we have enough days in OOT
+    num_days_needed = 5
+    if len(oot_date_range) < num_days_needed:
+        return df
+
+    for d in range(num_days_needed):
+        current_date = oot_date_range[d]
+        amount = amounts[d]
+        # OUT (Customer A)
+        new_rows.append({'transaction_id': base_id, 'customer_id': source_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'OUT', 'label': 6})
+        # IN (Customer B)
+        new_rows.append({'transaction_id': base_id + 1, 'customer_id': target_id, 'date': pd.to_datetime(current_date), 'amount': amount, 'direction': 'IN', 'label': 6})
+        base_id += 2
+            
+    return pd.concat([df, pd.DataFrame(new_rows)])
 
 def _inject_persistent_link(df: pd.DataFrame, num_typologies: int, date_range: List[datetime.date], num_customers: int) -> pd.DataFrame:
     """Inject a pair with 5 identical transactions over 5 consecutive days. Label: 5"""

@@ -119,32 +119,34 @@ class GraphBuilder:
 
     def _match_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
         strategy = self.config['graph'].get('matching_strategy', 'exact_1_to_1')
-        used_pairs = set() # (tx_id, counterparty_id)
+        # Uniqueness per (Source, Target, TransactionID) to allow multi-counterparty matches
+        used_pair_tx = set() 
         
         all_matches = []
         
-        # Pass 1: Always check for 1:1 matches first (Cleanest signal)
-        # This is integrated into the other strategies or run standalone
-        if strategy == 'exact_1_to_1':
-            return self._match_one_to_one(df, used_pairs)
+        # Priority 1: One-to-One
+        if strategy in ['exact_1_to_1', 'hybrid']:
+            all_matches.append(self._match_one_to_one(df, used_pair_tx))
         
+        # Priority 2: Many-to-One
         if strategy in ['many_to_one', 'hybrid']:
-            all_matches.append(self._match_many_to_one(df, used_pairs))
+            all_matches.append(self._match_many_to_one(df, used_pair_tx))
             
+        # Priority 3: One-to-Many
         if strategy in ['one_to_many', 'hybrid']:
-            all_matches.append(self._match_one_to_many(df, used_pairs))
+            all_matches.append(self._match_one_to_many(df, used_pair_tx))
             
-        # Final Pass: Fallback to 1:1 for anything not captured by complex patterns
-        # Only if not already run as primary
-        all_matches.append(self._match_one_to_one(df, used_pairs))
-        
+        # Fallback for strategies not covered by priority list
+        if strategy not in ['exact_1_to_1', 'many_to_one', 'one_to_many', 'hybrid']:
+            all_matches.append(self._match_one_to_one(df, used_pair_tx))
+
         combined = pd.concat([m for m in all_matches if not m.empty])
         if combined.empty: return combined
         
-        # Final safety deduplication between strategy outputs
-        return combined.drop_duplicates(subset=['out_tx_id', 'in_tx_id'])
+        # Final safety deduplication between strategy outputs for the same pair
+        return combined.drop_duplicates(subset=['source', 'target', 'out_tx_id', 'in_tx_id'])
 
-    def _match_one_to_one(self, df: pd.DataFrame, used_pairs: set) -> pd.DataFrame:
+    def _match_one_to_one(self, df: pd.DataFrame, used_pair_tx: set) -> pd.DataFrame:
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].sort_values(date_col).copy()
@@ -152,27 +154,31 @@ class GraphBuilder:
         matches = []; tol = self.config['graph']['amount_tolerance_pct']; window = self.config['graph']['time_window_days']
         
         for _, in_row in in_tx.iterrows():
-            # Skip if this specific transaction has already been matched with ANYONE
-            # (Optional: can be relaxed to pair-level, but 1:1 usually implies transaction-level lock)
-            if (in_row[tx_id_col], None) in used_pairs: continue 
-            
             mask = ((out_tx[date_col] <= in_row[date_col]) & (out_tx[date_col] >= in_row[date_col] - pd.Timedelta(days=window)) &
                     (out_tx[amt_col] >= in_row[amt_col] * (1 - tol)) & (out_tx[amt_col] <= in_row[amt_col] * (1 + tol)))
             
-            potential_outs = out_tx[mask].sort_values(date_col, ascending=False)
+            potential_outs = out_tx[mask].copy()
+            if potential_outs.empty: continue
+            
+            # Prioritize closer amount matches for better signal within the same pair
+            potential_outs['amt_diff'] = (potential_outs[amt_col] - in_row[amt_col]).abs()
+            potential_outs = potential_outs.sort_values(['amt_diff', date_col], ascending=[True, False])
+            
             for _, out_row in potential_outs.iterrows():
-                # Strict Bidirectional Pair Check
-                p1 = (in_row[tx_id_col], out_row[c_id])
-                p2 = (out_row[tx_id_col], in_row[c_id])
+                # Lock per (Source, Target, TransactionID) to allow multi-counterparty connections 
+                # while preventing duplicate use of a tx between the same two nodes.
+                p_out = (out_row[c_id], in_row[c_id], out_row[tx_id_col])
+                p_in = (out_row[c_id], in_row[c_id], in_row[tx_id_col])
                 
-                if p1 not in used_pairs and p2 not in used_pairs:
+                if p_out not in used_pair_tx and p_in not in used_pair_tx:
                     matches.append(self._create_match_dict(out_row, in_row, min(out_row[amt_col], in_row[amt_col]), 1.0, c_id, date_col, tx_id_col, amt_col))
-                    used_pairs.add(p1); used_pairs.add(p2)
-                    break 
+                    used_pair_tx.add(p_out)
+                    used_pair_tx.add(p_in)
+                    # We do NOT break here to allow this in_row to match with OTHER sources
         return pd.DataFrame(matches)
 
-    def _match_many_to_one(self, df: pd.DataFrame, used_pairs: set) -> pd.DataFrame:
-        """Finds multiple OUTs (mules) summing to one large IN (hub) with strict pair-level uniqueness."""
+    def _match_many_to_one(self, df: pd.DataFrame, used_pair_tx: set) -> pd.DataFrame:
+        """Finds multiple OUTs (mules) summing to one large IN (hub) with pair-level uniqueness."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].sort_values(date_col).copy(); out_tx = df[df[dir_col] == out_val].sort_values(date_col).copy()
@@ -190,27 +196,36 @@ class GraphBuilder:
             for n in range(2, max_n + 1):
                 part_amt = target_amt / n
                 part_mask = (candidates[amt_col] >= part_amt*(1-tol)) & (candidates[amt_col] <= part_amt*(1+tol))
-                parts = candidates[part_mask]
+                parts = candidates[part_mask].copy()
+                if parts.empty: continue
                 
-                # Check for available (unused) pairs
-                available_parts = []
-                for _, p_row in parts.iterrows():
-                    p1 = (in_row[tx_id_col], p_row[c_id])
-                    p2 = (p_row[tx_id_col], in_row[c_id])
-                    if p1 not in used_pairs and p2 not in used_pairs:
-                        available_parts.append(p_row)
+                # Prioritize closer matches for the fractional amount
+                parts['amt_diff'] = (parts[amt_col] - part_amt).abs()
+                parts = parts.sort_values(['amt_diff', date_col], ascending=[True, False])
+                
+                # Filter parts that haven't been used with this Hub for THIS specific pair
+                available_parts = [p_row for _, p_row in parts.iterrows() if (p_row[c_id], in_row[c_id], p_row[tx_id_col]) not in used_pair_tx]
                 
                 if len(available_parts) >= n:
-                    for i in range(n):
+                    matched_this_n = 0
+                    for i in range(len(available_parts)):
                         out_row = available_parts[i]
-                        matches.append(self._create_match_dict(out_row, in_row, out_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
-                        used_pairs.add((in_row[tx_id_col], out_row[c_id]))
-                        used_pairs.add((out_row[tx_id_col], in_row[c_id]))
-                    break 
+                        p_out = (out_row[c_id], in_row[c_id], out_row[tx_id_col])
+                        p_in = (out_row[c_id], in_row[c_id], in_row[tx_id_col])
+                        
+                        if p_out not in used_pair_tx and p_in not in used_pair_tx:
+                            matches.append(self._create_match_dict(out_row, in_row, out_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
+                            used_pair_tx.add(p_out)
+                            used_pair_tx.add(p_in)
+                            matched_this_n += 1
+                        
+                        if matched_this_n >= n: break 
+                    
+                    if matched_this_n >= n: break
         return pd.DataFrame(matches)
 
-    def _match_one_to_many(self, df: pd.DataFrame, used_pairs: set) -> pd.DataFrame:
-        """Finds one large OUT (hub) distributed into multiple smaller INs (mules) with strict pair-level uniqueness."""
+    def _match_one_to_many(self, df: pd.DataFrame, used_pair_tx: set) -> pd.DataFrame:
+        """Finds one large OUT (hub) distributed into multiple smaller INs (mules) with pair-level uniqueness."""
         c_id = self.mapping['customer_id']; dir_col = self.mapping['direction']; amt_col = self.mapping['amount']
         date_col = self.mapping['date']; tx_id_col = self.mapping['transaction_id']; in_val = self.mapping['direction_in']; out_val = self.mapping['direction_out']
         in_tx = df[df[dir_col] == in_val].sort_values(date_col).copy(); out_tx = df[df[dir_col] == out_val].sort_values(date_col).copy()
@@ -227,22 +242,31 @@ class GraphBuilder:
             for n in range(2, max_n + 1):
                 part_amt = source_amt / n
                 part_mask = (candidates[amt_col] >= part_amt*(1-tol)) & (candidates[amt_col] <= part_amt*(1+tol))
-                parts = candidates[part_mask]
+                parts = candidates[part_mask].copy()
+                if parts.empty: continue
 
-                available_parts = []
-                for _, p_row in parts.iterrows():
-                    p1 = (out_row[tx_id_col], p_row[c_id])
-                    p2 = (p_row[tx_id_col], out_row[c_id])
-                    if p1 not in used_pairs and p2 not in used_pairs:
-                        available_parts.append(p_row)
+                # Prioritize closer matches for the fractional amount
+                parts['amt_diff'] = (parts[amt_col] - part_amt).abs()
+                parts = parts.sort_values(['amt_diff', date_col], ascending=[True, False])
+
+                available_parts = [p_row for _, p_row in parts.iterrows() if (out_row[c_id], p_row[c_id], p_row[tx_id_col]) not in used_pair_tx]
 
                 if len(available_parts) >= n:
-                    for i in range(n):
+                    matched_this_n = 0
+                    for i in range(len(available_parts)):
                         in_row = available_parts[i]
-                        matches.append(self._create_match_dict(out_row, in_row, in_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
-                        used_pairs.add((in_row[tx_id_col], out_row[c_id]))
-                        used_pairs.add((out_row[tx_id_col], in_row[c_id]))
-                    break 
+                        p_out = (out_row[c_id], in_row[c_id], out_row[tx_id_col])
+                        p_in = (out_row[c_id], in_row[c_id], in_row[tx_id_col])
+
+                        if p_out not in used_pair_tx and p_in not in used_pair_tx:
+                            matches.append(self._create_match_dict(out_row, in_row, in_row[amt_col], 1.0, c_id, date_col, tx_id_col, amt_col))
+                            used_pair_tx.add(p_out)
+                            used_pair_tx.add(p_in)
+                            matched_this_n += 1
+                        
+                        if matched_this_n >= n: break 
+
+                    if matched_this_n >= n: break 
         return pd.DataFrame(matches)
 
     def _create_match_dict(self, out_row, in_row, amt, scarcity_multiplier, c_id, date_col, tx_id_col, amt_col):
